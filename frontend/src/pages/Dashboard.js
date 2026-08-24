@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Inventario from './Inventario';
+import Ventas from './Ventas';
 
 const Dashboard = () => {
   const { usuario, logout } = useAuth();
@@ -31,6 +32,7 @@ const Dashboard = () => {
   const renderContenido = () => {
     switch(moduloActivo) {
       case 'inventario': return <Inventario />;
+      case 'ventas': return <Ventas />;
       default: return (
         <div>
           <div style={styles.header}>
