@@ -5,23 +5,22 @@ require('dotenv').config();
 const { sequelize } = require('./models/index');
 const authRoutes = require('./modules/auth/auth.routes');
 const inventarioRoutes = require('./modules/inventario/inventario.routes');
+const ventasRoutes = require('./modules/ventas/ventas.routes');
 
 const app = express();
 
-app.use(cors());
+app.use(cors({ origin: 'http://localhost:3001', credentials: true }));
 app.use(express.json());
 
-// Rutas
 app.use('/api/auth', authRoutes);
 app.use('/api/inventario', inventarioRoutes);
+app.use('/api/ventas', ventasRoutes);
 
-// Ruta de prueba
 app.get('/', (req, res) => {
   res.json({ mensaje: 'Pansys API funcionando ✅' });
 });
 
-// Sincronizar modelos y arrancar servidor
-sequelize.sync({ alter: true })
+sequelize.sync({ alter: false })
   .then(() => {
     console.log('Base de datos sincronizada ✅');
     app.listen(process.env.PORT, () => {

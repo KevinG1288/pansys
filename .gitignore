@@ -1,0 +1,10 @@
+# Dependencias
+node_modules/
+
+# Variables de entorno (las plantillas .env.example sí se versionan)
+.env
+.env.*
+!.env.example
+
+# Documento de contexto local (contiene datos personales)
+PANSYS_CLAUDE_CODE_CONTEXT.md
