@@ -1,23 +1,29 @@
 const { Venta, DetalleVenta, Producto } = require('../../models/index');
 
+// Campos que el cliente puede enviar al crear un producto (panaderia_id y estado los fija el servidor)
+const CAMPOS_PRODUCTO = ['nombre', 'precio_compra', 'precio_venta', 'cantidad_disponible'];
+
 class VentasService {
 
-  async getAll(panaderia_id) {
+  async getAll(panaderiaId) {
     return await Venta.findAll({
-      where: { panaderia_id },
+      where: { panaderia_id: panaderiaId },
       include: [{ model: DetalleVenta, include: [Producto] }],
       order: [['createdAt', 'DESC']]
     });
   }
 
-  async crear(datos) {
-    const { empleado_id, panaderia_id, productos } = datos;
+  async crear(datos, panaderiaId, empleadoId) {
+    const { productos } = datos;
 
     let total = 0;
     const detalles = [];
 
     for (const p of productos) {
-      const producto = await Producto.findByPk(p.producto_id);
+      // Solo productos activos de la misma panadería
+      const producto = await Producto.findOne({
+        where: { id: p.producto_id, panaderia_id: panaderiaId, estado: true }
+      });
       if (!producto) throw new Error(`Producto ${p.producto_id} no encontrado`);
       const subtotal = producto.precio_venta * p.cantidad;
       total += subtotal;
@@ -29,7 +35,7 @@ class VentasService {
       });
     }
 
-    const venta = await Venta.create({ empleado_id, panaderia_id, total });
+    const venta = await Venta.create({ empleado_id: empleadoId, panaderia_id: panaderiaId, total });
 
     for (const d of detalles) {
       await DetalleVenta.create({ ...d, venta_id: venta.id });
@@ -38,14 +44,17 @@ class VentasService {
     return venta;
   }
 
-  async getProductos(panaderia_id) {
+  async getProductos(panaderiaId) {
     return await Producto.findAll({
-      where: { panaderia_id, estado: true }
+      where: { panaderia_id: panaderiaId, estado: true }
     });
   }
 
-  async crearProducto(datos) {
-    return await Producto.create(datos);
+  async crearProducto(datos, panaderiaId) {
+    const campos = Object.fromEntries(
+      CAMPOS_PRODUCTO.filter(c => datos[c] !== undefined).map(c => [c, datos[c]])
+    );
+    return await Producto.create({ ...campos, panaderia_id: panaderiaId });
   }
 }
 

@@ -1,10 +1,16 @@
 const router = require('express').Router();
 const ventasController = require('./ventas.controller');
 const verificarToken = require('../../middlewares/auth.middleware');
+const { permitirRoles, resolverPanaderia } = require('../../middlewares/roles.middleware');
+const { ADMINISTRADOR, PANADERO, GERENTE } = require('../../config/roles');
 
-router.get('/', verificarToken, ventasController.getAll);
-router.post('/', verificarToken, ventasController.crear);
-router.get('/productos', verificarToken, ventasController.getProductos);
-router.post('/productos', verificarToken, ventasController.crearProducto);
+// Lectura: todos los roles. Escritura: administrador y panadero
+const lectura = [verificarToken, permitirRoles(ADMINISTRADOR, PANADERO, GERENTE), resolverPanaderia()];
+const escritura = [verificarToken, permitirRoles(ADMINISTRADOR, PANADERO), resolverPanaderia()];
+
+router.get('/', ...lectura, ventasController.getAll);
+router.post('/', ...escritura, ventasController.crear);
+router.get('/productos', ...lectura, ventasController.getProductos);
+router.post('/productos', ...escritura, ventasController.crearProducto);
 
 module.exports = router;

@@ -20,6 +20,11 @@ const Usuario = sequelize.define('Usuario', {
     type: DataTypes.INTEGER,
     allowNull: false
   },
+  // NULL = administrador general (opera sobre ambas panaderías)
+  panaderia_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
   estado: {
     type: DataTypes.BOOLEAN,
     defaultValue: true

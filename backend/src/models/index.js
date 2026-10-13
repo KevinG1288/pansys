@@ -14,6 +14,10 @@ Usuario.belongsTo(Rol, { foreignKey: 'rol_id' });
 Usuario.hasOne(Panaderia, { foreignKey: 'usuario_id' });
 Panaderia.belongsTo(Usuario, { foreignKey: 'usuario_id' });
 
+// Panadería en la que trabaja el usuario (alias para no chocar con la relación anterior)
+Panaderia.hasMany(Usuario, { foreignKey: 'panaderia_id', as: 'empleados', onDelete: 'RESTRICT' });
+Usuario.belongsTo(Panaderia, { foreignKey: 'panaderia_id', as: 'panaderiaAsignada' });
+
 Panaderia.hasMany(MateriaPrima, { foreignKey: 'panaderia_id' });
 MateriaPrima.belongsTo(Panaderia, { foreignKey: 'panaderia_id' });
 
