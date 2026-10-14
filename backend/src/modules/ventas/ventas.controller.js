@@ -1,4 +1,5 @@
 const ventasService = require('./ventas.service');
+const { responderError } = require('../../utils/errores');
 
 class VentasController {
 
@@ -17,7 +18,8 @@ class VentasController {
       const venta = await ventasService.crear(req.body, req.panaderiaId, req.usuario.id);
       res.status(201).json(venta);
     } catch (error) {
-      res.status(400).json({ error: error.message });
+      // 400 datos inválidos, 404 producto ajeno o inexistente, 409 stock insuficiente o conflicto, 500 interno
+      responderError(res, error);
     }
   }
 

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
-    "test:produccion": "node pruebas/produccion.pruebas.js"
+    "test:produccion": "node pruebas/produccion.pruebas.js",
+    "test:ventas": "node pruebas/ventas.pruebas.js"
   },
   "keywords": [],
   "author": "",
