@@ -8,7 +8,9 @@ const sequelize = new Sequelize(
   {
     host: process.env.DB_HOST,
     dialect: 'mysql',
-    logging: false
+    logging: false,
+    // Entregar las columnas DECIMAL como números (por defecto mysql2 las devuelve como texto)
+    dialectOptions: { decimalNumbers: true }
   }
 );
 

@@ -6,6 +6,7 @@ const { sequelize } = require('./models/index');
 const authRoutes = require('./modules/auth/auth.routes');
 const inventarioRoutes = require('./modules/inventario/inventario.routes');
 const ventasRoutes = require('./modules/ventas/ventas.routes');
+const produccionRoutes = require('./modules/produccion/produccion.routes');
 
 const app = express();
 
@@ -15,14 +16,17 @@ app.use(express.json());
 app.use('/api/auth', authRoutes);
 app.use('/api/inventario', inventarioRoutes);
 app.use('/api/ventas', ventasRoutes);
+app.use('/api/produccion', produccionRoutes);
 
 app.get('/', (req, res) => {
   res.json({ mensaje: 'Pansys API funcionando ✅' });
 });
 
-sequelize.sync({ alter: false })
+// Solo se verifica la conexión: el esquema lo definen los scripts de backend/database
+// (sync() crearía tablas sin los CHECK ni las claves foráneas de esos scripts)
+sequelize.authenticate()
   .then(() => {
-    console.log('Base de datos sincronizada ✅');
+    console.log('Conexión a la base de datos verificada ✅');
     app.listen(process.env.PORT, () => {
       console.log(`Servidor corriendo en puerto ${process.env.PORT} ✅`);
     });

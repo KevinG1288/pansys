@@ -6,6 +6,9 @@ const MateriaPrima = require('./MateriaPrima');
 const Producto = require('./Producto');
 const Venta = require('./Venta');
 const DetalleVenta = require('./DetalleVenta');
+const RecetaProducto = require('./RecetaProducto');
+const OrdenProduccion = require('./OrdenProduccion');
+const InsumoUsado = require('./InsumoUsado');
 
 // Relaciones
 Rol.hasMany(Usuario, { foreignKey: 'rol_id' });
@@ -33,6 +36,29 @@ DetalleVenta.belongsTo(Venta, { foreignKey: 'venta_id' });
 Producto.hasMany(DetalleVenta, { foreignKey: 'producto_id' });
 DetalleVenta.belongsTo(Producto, { foreignKey: 'producto_id' });
 
+// Producción: recetas
+Producto.hasMany(RecetaProducto, { foreignKey: 'producto_id', as: 'receta' });
+RecetaProducto.belongsTo(Producto, { foreignKey: 'producto_id' });
+
+MateriaPrima.hasMany(RecetaProducto, { foreignKey: 'materia_prima_id' });
+RecetaProducto.belongsTo(MateriaPrima, { foreignKey: 'materia_prima_id' });
+
+// Producción: órdenes
+Panaderia.hasMany(OrdenProduccion, { foreignKey: 'panaderia_id' });
+OrdenProduccion.belongsTo(Panaderia, { foreignKey: 'panaderia_id' });
+
+Producto.hasMany(OrdenProduccion, { foreignKey: 'producto_id' });
+OrdenProduccion.belongsTo(Producto, { foreignKey: 'producto_id' });
+
+OrdenProduccion.belongsTo(Usuario, { foreignKey: 'empleado_id', as: 'empleado' });
+OrdenProduccion.belongsTo(Usuario, { foreignKey: 'cerrado_por', as: 'cerradoPor' });
+
+OrdenProduccion.hasMany(InsumoUsado, { foreignKey: 'orden_id', as: 'insumos' });
+InsumoUsado.belongsTo(OrdenProduccion, { foreignKey: 'orden_id' });
+
+MateriaPrima.hasMany(InsumoUsado, { foreignKey: 'materia_prima_id' });
+InsumoUsado.belongsTo(MateriaPrima, { foreignKey: 'materia_prima_id' });
+
 module.exports = {
   sequelize,
   Rol,
@@ -41,5 +67,8 @@ module.exports = {
   MateriaPrima,
   Producto,
   Venta,
-  DetalleVenta
+  DetalleVenta,
+  RecetaProducto,
+  OrdenProduccion,
+  InsumoUsado
 };
