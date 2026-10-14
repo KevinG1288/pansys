@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { notificarErrorDeAutenticacion } from '../lib/sesion';
 
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL
@@ -13,4 +14,13 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-export default api; 
+// Un 401 (salvo el del login) cierra la sesión; el error se sigue propagando a quien hizo la petición
+api.interceptors.response.use(
+  (respuesta) => respuesta,
+  (error) => {
+    notificarErrorDeAutenticacion(error);
+    return Promise.reject(error);
+  }
+);
+
+export default api;

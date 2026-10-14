@@ -1,189 +1,196 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Boxes, PackageX, Plus, RotateCw, TriangleAlert, Wallet } from 'lucide-react';
 import api from '../services/api';
+import { useAuth } from '../context/AuthContext';
+import { mensajeError } from '../lib/errores';
+import { formatCOP } from '../lib/formato';
+import { puedeEscribir } from '../lib/permisos';
+import Aviso from '../components/ui/Aviso';
+import Boton from '../components/ui/Boton';
+import DialogoConfirmacion from '../components/ui/DialogoConfirmacion';
+import { PageHeader } from '../components/ui/Panel';
+import StatCard from '../components/ui/StatCard';
+import FormularioInsumo from '../components/inventario/FormularioInsumo';
+import TablaInsumos, { estadoInsumo } from '../components/inventario/TablaInsumos';
+
+// Panadería con la que trabaja la interfaz (para panadero y gerente el backend usa la del token)
+const PANADERIA_ID = 1;
+const ID_AVISO_CONSULTA = 'aviso-modo-consulta-inventario';
 
 const Inventario = () => {
-  const [items, setItems] = useState([]);
+  const { usuario } = useAuth();
+  const escribe = puedeEscribir(usuario);
+
+  const [insumos, setInsumos] = useState([]);
   const [cargando, setCargando] = useState(true);
-  const [mostrarForm, setMostrarForm] = useState(false);
-  const [form, setForm] = useState({
-    nombre: '', unidad_medida: '', cantidad_disponible: '',
-    stock_minimo: '', precio_unitario: '', panaderia_id: 1
-  });
+  const [errorCarga, setErrorCarga] = useState(null);
+  const [formulario, setFormulario] = useState(null); // null | { insumo: null } (alta) | { insumo } (edición)
+  const [aviso, setAviso] = useState(null);
+  const [porEliminar, setPorEliminar] = useState(null);
+  const [eliminando, setEliminando] = useState(false);
+  const [errorEliminar, setErrorEliminar] = useState(null);
 
-  useEffect(() => {
-    cargarInventario();
-  }, []);
-
-  const cargarInventario = async () => {
+  const cargarInventario = useCallback(async () => {
+    setErrorCarga(null);
     try {
-      const res = await api.get('/api/inventario?panaderia_id=1');
-      setItems(res.data);
+      const res = await api.get(`/api/inventario?panaderia_id=${PANADERIA_ID}`);
+      setInsumos(res.data);
     } catch (error) {
-      console.error('Error cargando inventario:', error);
+      setErrorCarga(mensajeError(error, 'No se pudo cargar el inventario.'));
     } finally {
       setCargando(false);
     }
+  }, []);
+
+  useEffect(() => {
+    cargarInventario();
+  }, [cargarInventario]);
+
+  const resumen = useMemo(() => ({
+    registrados: insumos.length,
+    valor: insumos.reduce((total, i) => total + (Number(i.cantidad_disponible) || 0) * (Number(i.precio_unitario) || 0), 0),
+    bajo: insumos.filter(i => estadoInsumo(i) === 'bajo').length,
+    agotados: insumos.filter(i => estadoInsumo(i) === 'agotado').length
+  }), [insumos]);
+
+  const abrirAlta = () => {
+    setAviso(null);
+    setFormulario({ insumo: null });
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const abrirEdicion = (insumo) => {
+    setAviso(null);
+    setFormulario({ insumo });
+  };
+
+  // Recibe los datos ya validados y convertidos por FormularioInsumo; los errores los muestra el formulario
+  const guardarInsumo = async (datos) => {
+    const cuerpo = { ...datos, panaderia_id: PANADERIA_ID };
+    const editando = Boolean(formulario.insumo);
+    if (editando) {
+      await api.put(`/api/inventario/${formulario.insumo.id}`, cuerpo);
+    } else {
+      await api.post('/api/inventario', cuerpo);
+    }
+    setFormulario(null);
+    setAviso({ tipo: 'exito', texto: editando ? `«${datos.nombre}» se actualizó correctamente.` : `«${datos.nombre}» se agregó al inventario.` });
+    await cargarInventario();
+  };
+
+  const pedirEliminacion = (insumo) => {
+    setAviso(null);
+    setErrorEliminar(null);
+    setPorEliminar(insumo);
+  };
+
+  const confirmarEliminacion = async () => {
+    setEliminando(true);
+    setErrorEliminar(null);
     try {
-      await api.post('/api/inventario', form);
-      setMostrarForm(false);
-      setForm({
-        nombre: '', unidad_medida: '', cantidad_disponible: '',
-        stock_minimo: '', precio_unitario: '', panaderia_id: 1
-      });
-      cargarInventario();
+      await api.delete(`/api/inventario/${porEliminar.id}`);
+      setAviso({ tipo: 'exito', texto: `«${porEliminar.nombre}» se eliminó del inventario.` });
+      setPorEliminar(null);
+      await cargarInventario();
     } catch (error) {
-      console.error('Error creando item:', error);
+      setErrorEliminar(mensajeError(error, 'No se pudo eliminar el insumo.'));
+    } finally {
+      setEliminando(false);
     }
   };
 
-  const handleEliminar = async (id) => {
-    if (window.confirm('¿Eliminar este insumo?')) {
-      await api.delete(`/api/inventario/${id}`);
-      cargarInventario();
-    }
+  const reintentar = () => {
+    setCargando(true);
+    cargarInventario();
   };
+
+  const sinDatos = cargando || errorCarga;
+  const descritoPor = escribe ? undefined : ID_AVISO_CONSULTA;
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h2 style={styles.titulo}>📦 Inventario de Materia Prima</h2>
-        <button style={styles.btnNuevo} onClick={() => setMostrarForm(!mostrarForm)}>
-          {mostrarForm ? '✕ Cancelar' : '+ Nuevo insumo'}
-        </button>
+    <div className="pansys-ui flex-1 px-4 py-6 md:px-6 lg:px-8 lg:py-8">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
+        <PageHeader
+          antetitulo="Módulo"
+          titulo="Inventario de insumos"
+          descripcion="Controla las existencias, los mínimos de reposición y el valor de cada materia prima."
+          acciones={
+            <Boton onClick={abrirAlta} disabled={!escribe || Boolean(formulario)} aria-describedby={descritoPor}>
+              <Plus className="size-4" aria-hidden="true" />
+              Nuevo insumo
+            </Boton>
+          }
+        />
+
+        {!escribe && (
+          <Aviso tipo="info" id={ID_AVISO_CONSULTA}>
+            Modo consulta: tu rol permite ver el inventario, pero no crear, editar ni eliminar insumos.
+          </Aviso>
+        )}
+
+        {aviso && (
+          <Aviso tipo={aviso.tipo} onCerrar={() => setAviso(null)}>
+            {aviso.texto}
+          </Aviso>
+        )}
+
+        {formulario && (
+          <FormularioInsumo
+            key={formulario.insumo?.id ?? 'nuevo'}
+            insumo={formulario.insumo}
+            onGuardar={guardarInsumo}
+            onCancelar={() => setFormulario(null)}
+          />
+        )}
+
+        <section aria-label="Resumen de inventario" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard etiqueta="Insumos registrados" valor={sinDatos ? '—' : String(resumen.registrados)} icono={Boxes} />
+          <StatCard
+            tono="primario"
+            etiqueta="Valor del inventario"
+            valor={sinDatos ? '—' : formatCOP(resumen.valor)}
+            icono={Wallet}
+            nota="Cantidad × precio unitario"
+          />
+          <StatCard etiqueta="Con stock bajo" valor={sinDatos ? '—' : String(resumen.bajo)} icono={TriangleAlert} nota="En el mínimo o por debajo" />
+          <StatCard tono="alerta" etiqueta="Sin existencias" valor={sinDatos ? '—' : String(resumen.agotados)} icono={PackageX} />
+        </section>
+
+        {errorCarga ? (
+          <Aviso tipo="error" titulo="No se pudo cargar el inventario">
+            <p>{errorCarga}</p>
+            <Boton variante="contorno" tamano="sm" className="mt-3" onClick={reintentar}>
+              <RotateCw className="size-4" aria-hidden="true" />
+              Reintentar
+            </Boton>
+          </Aviso>
+        ) : cargando ? (
+          <p role="status" className="rounded-2xl border border-border/80 bg-card px-5 py-10 text-center text-sm text-muted-foreground">
+            Cargando inventario…
+          </p>
+        ) : (
+          <TablaInsumos
+            insumos={insumos}
+            puedeEditar={escribe}
+            descritoPor={descritoPor}
+            onEditar={abrirEdicion}
+            onEliminar={pedirEliminacion}
+          />
+        )}
       </div>
 
-      {mostrarForm && (
-        <div style={styles.form}>
-          <h3 style={styles.formTitulo}>Nuevo insumo</h3>
-          <form onSubmit={handleSubmit}>
-            <div style={styles.formGrid}>
-              <div style={styles.inputGroup}>
-                <label style={styles.label}>Nombre</label>
-                <input style={styles.input} value={form.nombre}
-                  onChange={e => setForm({...form, nombre: e.target.value})}
-                  placeholder="Ej: Harina de trigo" required />
-              </div>
-              <div style={styles.inputGroup}>
-                <label style={styles.label}>Unidad de medida</label>
-                <input style={styles.input} value={form.unidad_medida}
-                  onChange={e => setForm({...form, unidad_medida: e.target.value})}
-                  placeholder="Ej: kg, litros, unidades" required />
-              </div>
-              <div style={styles.inputGroup}>
-                <label style={styles.label}>Cantidad disponible</label>
-                <input style={styles.input} type="number" value={form.cantidad_disponible}
-                  onChange={e => setForm({...form, cantidad_disponible: e.target.value})}
-                  placeholder="0" required />
-              </div>
-              <div style={styles.inputGroup}>
-                <label style={styles.label}>Stock mínimo</label>
-                <input style={styles.input} type="number" value={form.stock_minimo}
-                  onChange={e => setForm({...form, stock_minimo: e.target.value})}
-                  placeholder="0" required />
-              </div>
-              <div style={styles.inputGroup}>
-                <label style={styles.label}>Precio unitario</label>
-                <input style={styles.input} type="number" value={form.precio_unitario}
-                  onChange={e => setForm({...form, precio_unitario: e.target.value})}
-                  placeholder="0" required />
-              </div>
-            </div>
-            <button style={styles.btnGuardar} type="submit">
-              💾 Guardar insumo
-            </button>
-          </form>
-        </div>
-      )}
-
-      {cargando ? (
-        <p style={styles.cargando}>Cargando inventario...</p>
-      ) : (
-        <div style={styles.tabla}>
-          <table style={styles.table}>
-            <thead>
-              <tr style={styles.thead}>
-                <th style={styles.th}>Nombre</th>
-                <th style={styles.th}>Unidad</th>
-                <th style={styles.th}>Disponible</th>
-                <th style={styles.th}>Stock mínimo</th>
-                <th style={styles.th}>Precio unitario</th>
-                <th style={styles.th}>Estado</th>
-                <th style={styles.th}>Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.length === 0 ? (
-                <tr>
-                  <td colSpan="7" style={styles.vacio}>
-                    No hay insumos registrados
-                  </td>
-                </tr>
-              ) : (
-                items.map(item => (
-                  <tr key={item.id} style={styles.tr}>
-                    <td style={styles.td}>{item.nombre}</td>
-                    <td style={styles.td}>{item.unidad_medida}</td>
-                    <td style={styles.td}>
-                      <span style={{
-                        color: item.cantidad_disponible <= item.stock_minimo ? 'red' : 'green',
-                        fontWeight: 'bold'
-                      }}>
-                        {item.cantidad_disponible}
-                      </span>
-                    </td>
-                    <td style={styles.td}>{item.stock_minimo}</td>
-                    <td style={styles.td}>${item.precio_unitario?.toLocaleString()}</td>
-                    <td style={styles.td}>
-                      <span style={{
-                        background: item.cantidad_disponible <= item.stock_minimo ? '#fee2e2' : '#dcfce7',
-                        color: item.cantidad_disponible <= item.stock_minimo ? '#991b1b' : '#166534',
-                        padding: '4px 10px', borderRadius: '20px', fontSize: '12px'
-                      }}>
-                        {item.cantidad_disponible <= item.stock_minimo ? '⚠️ Stock bajo' : '✅ Normal'}
-                      </span>
-                    </td>
-                    <td style={styles.td}>
-                      <button style={styles.btnEliminar}
-                        onClick={() => handleEliminar(item.id)}>
-                        🗑️
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+      {porEliminar && (
+        <DialogoConfirmacion
+          titulo={`¿Eliminar «${porEliminar.nombre}»?`}
+          descripcion="El insumo dejará de aparecer en el inventario."
+          textoConfirmar="Eliminar"
+          confirmando={eliminando}
+          error={errorEliminar}
+          onConfirmar={confirmarEliminacion}
+          onCancelar={() => setPorEliminar(null)}
+        />
       )}
     </div>
   );
-};
-
-const styles = {
-  container: { padding: '0' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' },
-  titulo: { color: '#0d2b5e', margin: 0 },
-  btnNuevo: { padding: '10px 20px', background: '#1168bd', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' },
-  form: { background: '#fff', borderRadius: '12px', padding: '24px', marginBottom: '24px', boxShadow: '0 2px 12px rgba(0,0,0,0.08)' },
-  formTitulo: { color: '#0d2b5e', marginTop: 0 },
-  formGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '16px' },
-  inputGroup: { display: 'flex', flexDirection: 'column' },
-  label: { fontSize: '13px', fontWeight: 'bold', color: '#334', marginBottom: '6px' },
-  input: { padding: '10px', border: '1px solid #ddd', borderRadius: '8px', fontSize: '14px' },
-  btnGuardar: { padding: '10px 24px', background: '#0f6e56', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' },
-  cargando: { textAlign: 'center', color: '#888' },
-  tabla: { background: '#fff', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 2px 12px rgba(0,0,0,0.08)' },
-  table: { width: '100%', borderCollapse: 'collapse' },
-  thead: { background: '#0d2b5e' },
-  th: { padding: '14px 16px', color: '#fff', textAlign: 'left', fontSize: '13px' },
-  tr: { borderBottom: '1px solid #f0f0f0' },
-  td: { padding: '14px 16px', fontSize: '14px', color: '#334' },
-  vacio: { textAlign: 'center', padding: '40px', color: '#888' },
-  btnEliminar: { background: '#fee2e2', border: 'none', borderRadius: '6px', padding: '6px 10px', cursor: 'pointer' }
 };
 
 export default Inventario;

@@ -5,7 +5,7 @@ import Dashboard from './pages/Dashboard';
 
 const PrivateRoute = ({ children }) => {
   const { usuario } = useAuth();
-  return usuario ? children : <Navigate to="/login" />;
+  return usuario ? children : <Navigate to="/login" replace />;
 };
 
 function App() {
