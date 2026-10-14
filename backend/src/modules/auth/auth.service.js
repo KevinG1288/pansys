@@ -2,6 +2,9 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Usuario, Rol, Panaderia } = require('../../models/index');
 const ROLES = require('../../config/roles');
+const { ErrorNegocio } = require('../../utils/errores');
+const { validarContrasenaNueva } = require('../../utils/contrasenas');
+const { parsearEmail } = require('../../utils/email');
 
 class AuthService {
 
@@ -37,7 +40,11 @@ class AuthService {
     return { token, usuario: datos };
   }
 
-  async registrar(email, contrasena, rol_id, panaderia_id) {
+  async registrar(emailRecibido, contrasena, rol_id, panaderia_id) {
+    // Misma política que el cambio de contraseña y la interfaz (lib/validacion.js)
+    const email = parsearEmail(emailRecibido);
+    validarContrasenaNueva(contrasena, 'La contraseña');
+
     // Solo se admiten los tres roles del sistema
     const rolId = Number(rol_id);
     if (!Object.values(ROLES).includes(rolId)) {
@@ -78,6 +85,26 @@ class AuthService {
     });
 
     return { mensaje: 'Usuario creado exitosamente', id: usuario.id };
+  }
+
+  // Cambio de la propia contraseña: primero se verifica la actual
+  async cambiarContrasena(usuarioId, actual, nueva) {
+    if (typeof actual !== 'string' || actual.length === 0) {
+      throw new ErrorNegocio('La contraseña actual es obligatoria', 400);
+    }
+    validarContrasenaNueva(nueva);
+    if (actual === nueva) {
+      throw new ErrorNegocio('La contraseña nueva debe ser distinta de la actual', 400);
+    }
+
+    const usuario = await Usuario.findOne({ where: { id: usuarioId, estado: true } });
+    if (!usuario) throw new ErrorNegocio('Cuenta no encontrada', 404);
+
+    const valida = await bcrypt.compare(actual, usuario.contrasena).catch(() => false);
+    if (!valida) throw new ErrorNegocio('La contraseña actual no es correcta', 400);
+
+    await usuario.update({ contrasena: await bcrypt.hash(nueva, 10) });
+    return { mensaje: 'Contraseña actualizada correctamente' };
   }
 }
 

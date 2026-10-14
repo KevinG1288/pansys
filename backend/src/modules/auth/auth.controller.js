@@ -1,4 +1,5 @@
 const authService = require('./auth.service');
+const { responderError } = require('../../utils/errores');
 
 class AuthController {
 
@@ -31,6 +32,16 @@ class AuthController {
 
     } catch (error) {
       res.status(400).json({ error: error.message });
+    }
+  }
+
+  async cambiarContrasena(req, res) {
+    try {
+      const { contrasena_actual, contrasena_nueva } = req.body ?? {};
+      const resultado = await authService.cambiarContrasena(req.usuario.id, contrasena_actual, contrasena_nueva);
+      res.json(resultado);
+    } catch (error) {
+      responderError(res, error);
     }
   }
 }

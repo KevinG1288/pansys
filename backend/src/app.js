@@ -7,6 +7,8 @@ const authRoutes = require('./modules/auth/auth.routes');
 const inventarioRoutes = require('./modules/inventario/inventario.routes');
 const ventasRoutes = require('./modules/ventas/ventas.routes');
 const produccionRoutes = require('./modules/produccion/produccion.routes');
+const usuariosRoutes = require('./modules/usuarios/usuarios.routes');
+const panaderiasRoutes = require('./modules/panaderias/panaderias.routes');
 
 const app = express();
 
@@ -17,6 +19,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/inventario', inventarioRoutes);
 app.use('/api/ventas', ventasRoutes);
 app.use('/api/produccion', produccionRoutes);
+app.use('/api/usuarios', usuariosRoutes);
+app.use('/api/panaderias', panaderiasRoutes);
 
 app.get('/', (req, res) => {
   res.json({ mensaje: 'Pansys API funcionando ✅' });
