@@ -8,3 +8,6 @@ node_modules/
 
 # Documento de contexto local (contiene datos personales)
 PANSYS_CLAUDE_CODE_CONTEXT.md
+
+# Diseño de referencia generado con v0 (no se versiona)
+/dise*o-v0/
