@@ -70,6 +70,13 @@ const main = async () => {
   if (base !== 'pansys_test') {
     throw new Error(`Base conectada "${base}": las pruebas solo se ejecutan sobre pansys_test`);
   }
+  // El backend requiere usuarios.version_sesion (SQL 004): sin ella, toda petición autenticada falla
+  const [versionSesion] = await sequelize.query(`
+    SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = 'pansys_test' AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'version_sesion'`);
+  if (Number(versionSesion[0].n) !== 1) {
+    throw new Error('pansys_test no tiene usuarios.version_sesion: aplique database/pruebas/004_version_sesion_pansys_test.sql');
+  }
 
   // ---------- Limpieza de datos de ejecuciones anteriores ----------
   for (const tabla of ['insumo_usado', 'orden_produccion', 'receta_producto', 'detalle_ventas', 'ventas', 'productos', 'materia_prima']) {

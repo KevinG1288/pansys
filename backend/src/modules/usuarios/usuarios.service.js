@@ -183,7 +183,12 @@ class UsuariosService {
       }
 
       if (Boolean(objetivo.estado) !== estado) {
-        await objetivo.update({ estado }, { transaction: t });
+        // Desactivar también sube la versión de sesión: los tokens anteriores no vuelven a
+        // valer aunque la cuenta se reactive (habrá que iniciar sesión de nuevo)
+        await objetivo.update({
+          estado,
+          ...(!estado && { version_sesion: sequelize.literal('version_sesion + 1') })
+        }, { transaction: t });
       }
 
       return obtenerFormateado(id, t);

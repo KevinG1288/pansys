@@ -5,9 +5,9 @@ class AuthController {
 
   async login(req, res) {
     try {
-      const { email, contrasena } = req.body;
+      const { email, contrasena } = req.body ?? {};
 
-      if (!email || !contrasena) {
+      if (!email || !contrasena || typeof email !== 'string' || typeof contrasena !== 'string') {
         return res.status(400).json({ error: 'Email y contraseña son requeridos' });
       }
 
@@ -15,7 +15,8 @@ class AuthController {
       res.json(resultado);
 
     } catch (error) {
-      res.status(401).json({ error: error.message });
+      // 401 "Credenciales inválidas"; cualquier error interno es un 500 sin detalles
+      responderError(res, error);
     }
   }
 

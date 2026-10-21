@@ -51,7 +51,7 @@ const igual = (descripcion, real, esperado) =>
   registrar(JSON.stringify(real) === JSON.stringify(esperado), descripcion,
     `obtenido ${JSON.stringify(real)}, esperado ${JSON.stringify(esperado)}`);
 
-// Stock real (FLOAT leído como DECIMAL)
+// Stock real leído directamente de la base (DECIMAL(12,4))
 const stock = async (id) => {
   const [[fila]] = await sequelize.query(
     'SELECT CAST(cantidad_disponible AS DECIMAL(16,4)) AS d FROM materia_prima WHERE id = ?',
@@ -89,6 +89,21 @@ const main = async () => {
   const [[{ base }]] = await sequelize.query('SELECT DATABASE() AS base');
   if (base !== 'pansys_test') {
     throw new Error(`Base conectada "${base}": las pruebas solo se ejecutan sobre pansys_test`);
+  }
+  // El backend requiere usuarios.version_sesion (SQL 004): sin ella, toda petición autenticada falla
+  const [versionSesion] = await sequelize.query(`
+    SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = 'pansys_test' AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'version_sesion'`);
+  if (Number(versionSesion[0].n) !== 1) {
+    throw new Error('pansys_test no tiene usuarios.version_sesion: aplique database/pruebas/004_version_sesion_pansys_test.sql');
+  }
+  // pansys_test debe tener el mismo esquema que pansys_db (SQL 003): si no, las pruebas no valen
+  const [tipos] = await sequelize.query(`
+    SELECT COLUMN_NAME AS c, COLUMN_TYPE AS t, IS_NULLABLE AS n FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = 'pansys_test' AND TABLE_NAME = 'materia_prima'
+      AND COLUMN_NAME IN ('cantidad_disponible', 'stock_minimo', 'precio_unitario')`);
+  if (tipos.length !== 3 || !tipos.every(f => f.t === 'decimal(12,4)' && f.n === 'NO')) {
+    throw new Error(`materia_prima de pansys_test no es DECIMAL(12,4) NOT NULL: ${JSON.stringify(tipos)}`);
   }
 
   // ---------- Limpieza de datos de ejecuciones anteriores ----------
@@ -237,7 +252,7 @@ const main = async () => {
   await esperar('cancelar orden E', 200, 'PATCH', `${P}/ordenes/${ordenE.id}/cancelar`, 'panadero1', { motivo: 'x', devolver_insumos: true });
   await esperar('cancelar dos veces -> 409', 409, 'PATCH', `${P}/ordenes/${ordenE.id}/cancelar`, 'panadero1', { motivo: 'x', devolver_insumos: true });
 
-  // ---------- Precisión con FLOAT ----------
+  // ---------- Precisión ----------
   console.log('\n== Precisión');
   await esperar('orden de 1000 panes de levadura', 201, 'POST', `${P}/ordenes`, 'panadero1', { producto_id: panLevadura.id, cantidad_planificada: 1000 });
   igual('25000,125 - 125 = 24875,125 exacto', await stock(levadura.id), 24875.125);
@@ -246,8 +261,10 @@ const main = async () => {
   console.log('\n== Precios y costos inválidos');
   const ordenesAntesPrecios = await contarOrdenes();
 
-  // Inventario acepta precios negativos; producción debe rechazarlos con 422 sin descontar nada
-  const sal = await crearInsumo('panadero1', 'Sal', 100, 0, -5);
+  // Inventario ya rechaza precios negativos, pero pueden existir datos anteriores con ese valor:
+  // se simula fijándolo directamente en la base de pruebas. Producción debe rechazarlo con 422.
+  const sal = await crearInsumo('panadero1', 'Sal', 100, 0, 0);
+  await sequelize.query('UPDATE materia_prima SET precio_unitario = -5 WHERE id = ?', { replacements: [sal.id] });
   const panSalado = await crearProducto('panadero1', 'Pan salado');
   await pedir('POST', `${P}/recetas/${panSalado.id}`, 'panadero1', { insumos: [{ materia_prima_id: sal.id, cantidad_por_unidad: '0.01' }] });
   await esperar('calcular con precio negativo -> 422', 422, 'GET', `${P}/calcular?producto_id=${panSalado.id}&cantidad=10`, 'panadero1');
@@ -265,6 +282,80 @@ const main = async () => {
   igual('costo excesivo: mensaje sobre el costo', /costo/i.test(excesivo?.error ?? ''), true);
   igual('costo excesivo: stock intacto', await stock(vainilla.id), 30000000);
   igual('precios y costos inválidos: ninguna orden creada', await contarOrdenes(), ordenesAntesPrecios);
+
+  // ---------- Precisión de DECIMAL(12,4) en costos y stock ----------
+  console.log('\n== Precisión de DECIMAL(12,4) en costos y stock');
+  const filaInsumo = async (ordenId) => (await sequelize.query(
+    'SELECT CAST(precio_unitario AS CHAR) AS precio, CAST(costo AS CHAR) AS costo FROM insumo_usado WHERE orden_id = ?',
+    { replacements: [ordenId] }))[0];
+  const costoOrden = async (ordenId) => (await sequelize.query(
+    'SELECT CAST(costo_insumos AS CHAR) AS c FROM orden_produccion WHERE id = ?', { replacements: [ordenId] }))[0][0].c;
+  const recetaUnica = async (nombre, insumoId, porUnidad) => {
+    const producto = await crearProducto('panadero1', nombre);
+    await pedir('POST', `${P}/recetas/${producto.id}`, 'panadero1', { insumos: [{ materia_prima_id: insumoId, cantidad_por_unidad: porUnidad }] });
+    return producto;
+  };
+
+  // Precio con 4 decimales: 12,5 kg × 12,3456 = 154,32 exacto (con el precio redondeado a 12,35 saldría 154,38)
+  const azafran = await crearInsumo('panadero1', 'Azafrán', 100, 0, 12.3456);
+  igual('inventario conserva el precio con 4 decimales', azafran?.precio_unitario, 12.3456);
+  const panAzafran = await recetaUnica('Pan de azafrán', azafran.id, '0.0125');
+  const calcAzafran = await esperar('calcular con precio de 4 decimales', 200, 'GET', `${P}/calcular?producto_id=${panAzafran.id}&cantidad=1000`, 'panadero1');
+  igual('calcular: precio sin redondear y costo exacto',
+    [calcAzafran?.insumos?.[0]?.precio_unitario, calcAzafran?.insumos?.[0]?.costo_estimado, calcAzafran?.costo_total_estimado],
+    [12.3456, 154.32, 154.32]);
+  const ordenAzafran = await esperar('orden con precio de 4 decimales', 201, 'POST', `${P}/ordenes`, 'panadero1', { producto_id: panAzafran.id, cantidad_planificada: 1000 });
+  const ordenAzafranId = ordenAzafran?.orden?.id;
+  igual('orden: costo de la línea y de la orden exactos (154.32)',
+    [(await filaInsumo(ordenAzafranId))[0]?.costo, await costoOrden(ordenAzafranId)], ['154.32', '154.32']);
+  igual('orden: copia histórica del precio redondeada a centavos (columna DECIMAL(12,2))', (await filaInsumo(ordenAzafranId))[0]?.precio, '12.35');
+  igual('orden: stock descontado exacto (100 - 12,5)', await stock(azafran.id), 87.5);
+
+  // Redondeo a centavos, una sola vez por línea y mitad hacia arriba
+  const anis = await crearInsumo('panadero1', 'Anís', 10, 0, '0.005');
+  const clavo = await crearInsumo('panadero1', 'Clavo', 10, 0, '0.005');
+  const panEspeciado = await crearProducto('panadero1', 'Pan especiado');
+  await pedir('POST', `${P}/recetas/${panEspeciado.id}`, 'panadero1', { insumos: [
+    { materia_prima_id: anis.id, cantidad_por_unidad: '0.001' }, { materia_prima_id: clavo.id, cantidad_por_unidad: '0.001' }
+  ] });
+  const calcEspeciado = await esperar('calcular con costos de medio centavo', 200, 'GET', `${P}/calcular?producto_id=${panEspeciado.id}&cantidad=1000`, 'panadero1');
+  igual('1 kg × 0,005 = 0,005 -> 0,01 por línea; total = suma de líneas (0,02)',
+    [calcEspeciado?.insumos?.map(i => i.costo_estimado), calcEspeciado?.costo_total_estimado], [[0.01, 0.01], 0.02]);
+
+  // Descuento exacto sin tolerancia: se puede consumir exactamente todo el stock, ni 0,0001 más
+  const pimienta = await crearInsumo('panadero1', 'Pimienta', '0.0003', 0, 1);
+  const panPimienta = await recetaUnica('Pan de pimienta', pimienta.id, '0.0001');
+  await esperar('consumir exactamente el stock (0,0003)', 201, 'POST', `${P}/ordenes`, 'panadero1', { producto_id: panPimienta.id, cantidad_planificada: 3 });
+  igual('stock queda exactamente en 0', await stock(pimienta.id), 0);
+  const sinPimienta = await esperar('0,0001 más de lo disponible -> 409', 409, 'POST', `${P}/ordenes`, 'panadero1', { producto_id: panPimienta.id, cantidad_planificada: 1 });
+  igual('faltante exacto de 0,0001', sinPimienta?.faltantes?.[0]?.faltante, 0.0001);
+
+  // Acumulación: 10 órdenes de 0,1 sobre un stock de 1 dejan exactamente 0 (con FLOAT se desviaría)
+  const comino = await crearInsumo('panadero1', 'Comino', 1, 0, 1000);
+  const panComino = await recetaUnica('Pan de comino', comino.id, '0.1');
+  const estadosComino = [];
+  for (let i = 0; i < 10; i++) {
+    estadosComino.push((await pedir('POST', `${P}/ordenes`, 'panadero1', { producto_id: panComino.id, cantidad_planificada: 1 })).status);
+  }
+  igual('10 órdenes de 0,1 aceptadas', estadosComino.every(st => st === 201), true);
+  igual('stock final exactamente 0', await stock(comino.id), 0);
+  await esperar('una orden más -> 409', 409, 'POST', `${P}/ordenes`, 'panadero1', { producto_id: panComino.id, cantidad_planificada: 1 });
+
+  // Devolver insumos no puede superar el máximo de DECIMAL(12,4): 409 claro, sin 500 ni cambios
+  const canela = await crearInsumo('panadero1', 'Canela', 10, 0, 1);
+  const panCanela = await recetaUnica('Pan de canela', canela.id, '2.5');
+  const ordenCanela = await esperar('orden de canela', 201, 'POST', `${P}/ordenes`, 'panadero1', { producto_id: panCanela.id, cantidad_planificada: 1 });
+  const ordenCanelaId = ordenCanela?.orden?.id;
+  await fijarStock(canela.id, '99999999.9999');
+  const desbordada = await esperar('cancelar devolviendo por encima del máximo -> 409', 409, 'PATCH',
+    `${P}/ordenes/${ordenCanelaId}/cancelar`, 'panadero1', { motivo: 'x', devolver_insumos: true });
+  igual('409 indica la materia prima y no expone detalles internos',
+    [desbordada?.materia_prima_id, /out of range/i.test(desbordada?.error ?? '')], [canela.id, false]);
+  igual('rollback: stock en el máximo y orden en proceso',
+    [await stock(canela.id), (await OrdenProduccion.findByPk(ordenCanelaId)).estado], [99999999.9999, 'en_proceso']);
+  await fijarStock(canela.id, '99999997.4999');
+  await esperar('con margen, la devolución se aplica', 200, 'PATCH', `${P}/ordenes/${ordenCanelaId}/cancelar`, 'panadero1', { motivo: 'x', devolver_insumos: true });
+  igual('devolución exacta: 99.999.997,4999 + 2,5', await stock(canela.id), 99999999.9999);
 
   // ---------- Concurrencia ----------
   console.log('\n== Concurrencia');

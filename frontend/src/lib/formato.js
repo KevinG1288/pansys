@@ -8,6 +8,15 @@ const pesos = new Intl.NumberFormat('es-CO', {
   maximumFractionDigits: 0
 });
 
+// Precio unitario: pesos con los decimales que tenga, hasta 4 (la precisión de materia_prima),
+// para no mostrar «$ 0» en precios menores de un peso. Los totales y costos usan formatCOP.
+const precio = new Intl.NumberFormat('es-CO', {
+  style: 'currency',
+  currency: 'COP',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 4
+});
+
 // Hasta 4 decimales: es la precisión que maneja el inventario
 const numero = new Intl.NumberFormat('es-CO', { maximumFractionDigits: 4 });
 
@@ -28,6 +37,8 @@ const fechaHora = new Intl.DateTimeFormat('es-CO', {
 });
 
 export const formatCOP = (valor) => pesos.format(Number(valor) || 0);
+
+export const formatPrecio = (valor) => precio.format(Number(valor) || 0);
 
 export const formatNumber = (valor) => numero.format(Number(valor) || 0);
 

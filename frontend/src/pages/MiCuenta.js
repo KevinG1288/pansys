@@ -13,7 +13,7 @@ const VACIO = { actual: '', nueva: '', confirmacion: '' };
 
 // Datos de la sesión y cambio de la propia contraseña (PATCH /api/auth/contrasena, todos los roles)
 const MiCuenta = () => {
-  const { usuario } = useAuth();
+  const { usuario, renovarToken } = useAuth();
   const [valores, setValores] = useState(VACIO);
   const [errores, setErrores] = useState({});
   const [errorGeneral, setErrorGeneral] = useState(null);
@@ -44,10 +44,17 @@ const MiCuenta = () => {
     guardandoRef.current = true;
     setGuardando(true);
     try {
-      await api.patch('/api/auth/contrasena', { contrasena_actual: valores.actual, contrasena_nueva: valores.nueva });
+      const res = await api.patch('/api/auth/contrasena', { contrasena_actual: valores.actual, contrasena_nueva: valores.nueva });
+      // El backend invalida los tokens anteriores y entrega uno nuevo a este dispositivo
+      const tokenNuevo = res?.data?.token;
+      if (typeof tokenNuevo === 'string' && tokenNuevo) {
+        renovarToken(tokenNuevo);
+        setAviso('Contraseña actualizada. Las sesiones abiertas en otros dispositivos se cerraron.');
+      } else {
+        setAviso('Contraseña actualizada. Úsala la próxima vez que inicies sesión.');
+      }
       setValores(VACIO);
       setErrores({});
-      setAviso('Contraseña actualizada. Úsala la próxima vez que inicies sesión.');
     } catch (error) {
       setErrorGeneral(mensajeError(error, 'No se pudo cambiar la contraseña.'));
     } finally {

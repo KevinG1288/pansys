@@ -4,6 +4,8 @@
 // modifican cuentas, por lo que abortan si la base conectada es otra. Al empezar y al
 // terminar restauran los usuarios 1-4 de la semilla y borran los creados por la prueba.
 //
+// Requiere el SQL 004 (usuarios.version_sesion) aplicado en pansys_test: si falta, aborta.
+//
 // Uso (desde backend/):  node pruebas/usuarios.pruebas.js
 
 process.env.DB_NAME = 'pansys_test';
@@ -77,6 +79,9 @@ const igual = (descripcion, real, esperado) =>
 const fila = async (id) =>
   (await sequelize.query('SELECT id, email, rol_id, panaderia_id, estado FROM usuarios WHERE id = ?', { replacements: [id] }))[0][0];
 
+const versionDe = async (id) =>
+  (await sequelize.query('SELECT version_sesion AS v FROM usuarios WHERE id = ?', { replacements: [id] }))[0][0]?.v;
+
 const adminsActivos = async () =>
   (await sequelize.query('SELECT COUNT(*) AS n FROM usuarios WHERE rol_id = 1 AND estado = 1'))[0][0].n;
 
@@ -93,7 +98,7 @@ const restaurarSemilla = async () => {
   await sequelize.query('DELETE FROM usuarios WHERE id > 4');
   for (const u of SEMILLA) {
     await sequelize.query(
-      "UPDATE usuarios SET email = ?, contrasena = '!', rol_id = ?, panaderia_id = ?, estado = 1 WHERE id = ?",
+      "UPDATE usuarios SET email = ?, contrasena = '!', rol_id = ?, panaderia_id = ?, estado = 1, version_sesion = 0 WHERE id = ?",
       { replacements: [u.email, u.rol_id, u.panaderia_id, u.id] }
     );
   }
@@ -114,6 +119,12 @@ const main = async () => {
   const [[{ base }]] = await sequelize.query('SELECT DATABASE() AS base');
   if (base !== 'pansys_test') {
     throw new Error(`Base conectada "${base}": las pruebas solo se ejecutan sobre pansys_test`);
+  }
+  const [columna] = await sequelize.query(`
+    SELECT COLUMN_TYPE AS t, IS_NULLABLE AS n, COLUMN_DEFAULT AS d FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = 'pansys_test' AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'version_sesion'`);
+  if (columna.length !== 1 || columna[0].t !== 'int unsigned' || columna[0].n !== 'NO' || columna[0].d !== '0') {
+    throw new Error('pansys_test no tiene usuarios.version_sesion INT UNSIGNED NOT NULL DEFAULT 0: aplique pruebas/004_version_sesion_pansys_test.sql');
   }
   baseVerificada = true;
   await restaurarSemilla();
@@ -141,7 +152,13 @@ const main = async () => {
     { contrasena_actual: '!', contrasena_nueva: 'Nueva1234' });
   await esperar('panadero2 (activo) no se ve afectado -> 200', 200, 'GET', '/api/inventario', 'panadero2');
   await esperar('admin reactiva a panadero1 -> 200', 200, 'PATCH', '/api/usuarios/2/estado', 'admin', { estado: true });
-  await esperar('mismo token tras reactivar -> 200', 200, 'GET', '/api/inventario', 'panadero1');
+  const tras = await esperar('token anterior a la desactivación, tras reactivar -> 401', 401, 'GET', '/api/inventario', 'panadero1');
+  igual('mensaje de sesión no válida', tras?.error, 'La sesión ya no es válida. Inicia sesión nuevamente.');
+  igual('desactivar subió la versión de sesión a 1', await versionDe(2), 1);
+  TOKENS.panadero1 = firmar({ id: 2, email: 'panadero1@pansys.test', rol: 'panadero', rol_id: 2, panaderia_id: 1, version_sesion: 1 });
+  await esperar('con un token de la versión actual -> 200', 200, 'GET', '/api/inventario', 'panadero1');
+  await restaurarSemilla();
+  TOKENS.panadero1 = firmar({ id: 2, email: 'panadero1@pansys.test', rol: 'panadero', rol_id: 2, panaderia_id: 1 });
 
   // Login real: una cuenta desactivada no puede iniciar sesión
   const idLogin = await crearCuenta('login.prueba@pansys.test', 'Clave1234', 2, 1);
@@ -300,7 +317,11 @@ const main = async () => {
 
   const cambio = await esperar('cambio correcto -> 200', 200, 'PATCH', '/api/auth/contrasena', 'clave',
     { contrasena_actual: 'Inicial123', contrasena_nueva: 'Nueva12345' });
-  igual('respuesta sin datos sensibles', cambio, { mensaje: 'Contraseña actualizada correctamente' });
+  igual('respuesta: mensaje y token nuevo, sin datos sensibles',
+    [Object.keys(cambio ?? {}).sort(), cambio?.mensaje, typeof cambio?.token], [['mensaje', 'token'], 'Contraseña actualizada correctamente', 'string']);
+  await esperar('el token anterior al cambio deja de valer -> 401', 401, 'GET', '/api/inventario', 'clave');
+  TOKENS.clave = cambio?.token;
+  await esperar('el token nuevo funciona -> 200', 200, 'GET', '/api/ventas', 'clave');
   const hashDespues = (await sequelize.query('SELECT contrasena AS c FROM usuarios WHERE id = ?', { replacements: [idClave] }))[0][0].c;
   igual('se guarda un hash bcrypt nuevo', [hashDespues !== hashAntes, /^\$2[aby]\$10\$/.test(hashDespues)], [true, true]);
   igual('login con la contraseña anterior -> 401', (await login('clave.prueba@pansys.test', 'Inicial123')).status, 401);
@@ -394,6 +415,102 @@ const main = async () => {
   igual('puede iniciar sesión con letras no ASCII en la contraseña', (await login('nuevo.registro@pansys.test', 'ñandú2026')).status, 200);
   const repetido2 = await registro({ email: 'nuevo.registro@pansys.test', contrasena: 'Clave1234' });
   igual('email repetido -> 400 (contrato de siempre)', [repetido2.status, repetido2.datos?.error], [400, 'El email ya está registrado']);
+
+  // ---------- Revocación de sesiones (version_sesion) ----------
+  console.log('\n== Revocación de sesiones (version_sesion)');
+  await restaurarSemilla();
+  const idR = await crearCuenta('revocacion@pansys.test', 'Inicial123', 2, 1);
+  const idOtra = await crearCuenta('otra.cuenta@pansys.test', 'Otra12345', 3, 1);
+  TOKENS.dispA = (await login('revocacion@pansys.test', 'Inicial123')).datos?.token;
+  TOKENS.dispB = (await login('revocacion@pansys.test', 'Inicial123')).datos?.token;
+  TOKENS.legado = firmar({ id: idR, email: 'revocacion@pansys.test', rol: 'panadero', rol_id: 2, panaderia_id: 1 });
+  TOKENS.otra = (await login('otra.cuenta@pansys.test', 'Otra12345')).datos?.token;
+  const cargaA = jwt.verify(TOKENS.dispA, process.env.JWT_SECRET);
+  igual('el login firma la versión actual (0) en el token', cargaA.version_sesion, 0);
+  const respLogin = (await login('revocacion@pansys.test', 'Inicial123')).datos;
+  igual('la respuesta del login no expone la versión', 'version_sesion' in (respLogin?.usuario ?? {}), false);
+  for (const t of ['dispA', 'dispB', 'legado', 'otra']) {
+    await esperar(`antes del cambio: token ${t} -> 200`, 200, 'GET', '/api/inventario', t);
+  }
+
+  const malCambio = await pedir('PATCH', '/api/auth/contrasena', 'dispA', { contrasena_actual: 'Equivocada1', contrasena_nueva: 'Nueva12345' });
+  igual('cambio fallido: 400 y la versión no sube', [malCambio.status, await versionDe(idR)], [400, 0]);
+  await esperar('tras un cambio fallido el token sigue valiendo -> 200', 200, 'GET', '/api/inventario', 'dispA');
+
+  const nuevo = await esperar('dispositivo A cambia la contraseña -> 200', 200, 'PATCH', '/api/auth/contrasena', 'dispA',
+    { contrasena_actual: 'Inicial123', contrasena_nueva: 'Nueva12345' });
+  TOKENS.dispA2 = nuevo?.token;
+  igual('versión en la base = 1 y en el token nuevo = 1',
+    [await versionDe(idR), jwt.decode(TOKENS.dispA2 ?? '')?.version_sesion ?? null], [1, 1]);
+  igual('la respuesta no expone hash ni versión', ['version_sesion' in (nuevo ?? {}), /\$2[aby]\$/.test(JSON.stringify(nuevo))], [false, false]);
+  for (const t of ['dispA', 'dispB', 'legado']) {
+    const r = await esperar(`token ${t} anterior al cambio -> 401`, 401, 'GET', '/api/inventario', t);
+    igual(`${t}: mensaje de sesión no válida`, r?.error, 'La sesión ya no es válida. Inicia sesión nuevamente.');
+  }
+  for (const [metodo, ruta] of [['GET', '/api/inventario'], ['GET', '/api/ventas'], ['GET', '/api/produccion/ordenes'], ['GET', '/api/produccion/recetas']]) {
+    await esperar(`token nuevo: ${ruta} -> 200`, 200, metodo, ruta, 'dispA2');
+  }
+  await esperar('otra cuenta no se ve afectada -> 200', 200, 'GET', '/api/inventario', 'otra');
+  igual('versiones de las demás cuentas sin cambios', [await versionDe(idOtra), await versionDe(1), await versionDe(2), await versionDe(3), await versionDe(4)], [0, 0, 0, 0, 0]);
+  await esperar('los tokens sin versión de otras cuentas siguen valiendo -> 200', 200, 'GET', '/api/inventario', 'panadero2');
+  igual('login con la contraseña anterior -> 401', (await login('revocacion@pansys.test', 'Inicial123')).status, 401);
+  TOKENS.dispC = (await login('revocacion@pansys.test', 'Nueva12345')).datos?.token;
+  await esperar('login nuevo (versión 1) -> 200', 200, 'GET', '/api/inventario', 'dispC');
+
+  const segundo = await esperar('segundo cambio desde el token nuevo -> 200', 200, 'PATCH', '/api/auth/contrasena', 'dispA2',
+    { contrasena_actual: 'Nueva12345', contrasena_nueva: 'Tercera123' });
+  TOKENS.dispA3 = segundo?.token;
+  igual('versión 2', await versionDe(idR), 2);
+  await esperar('el token del primer cambio deja de valer -> 401', 401, 'GET', '/api/inventario', 'dispA2');
+  await esperar('el login de la versión 1 deja de valer -> 401', 401, 'GET', '/api/inventario', 'dispC');
+  await esperar('el token del segundo cambio funciona -> 200', 200, 'GET', '/api/inventario', 'dispA3');
+
+  // Versiones falsificadas o con tipos no válidos
+  for (const [descripcion, version] of [['mayor que la actual', 5], ['menor que la actual', 1], ['texto', '2'], ['negativa', -1], ['decimal', 2.5], ['null', null]]) {
+    TOKENS.falso = firmar({ id: idR, email: 'revocacion@pansys.test', rol: 'panadero', rol_id: 2, panaderia_id: 1, version_sesion: version });
+    await esperar(`versión ${descripcion} en el token -> 401`, 401, 'GET', '/api/inventario', 'falso');
+  }
+
+  // Dos cambios simultáneos con la misma contraseña actual: uno gana, la versión sube una vez
+  TOKENS.simA = (await login('revocacion@pansys.test', 'Tercera123')).datos?.token;
+  TOKENS.simB = (await login('revocacion@pansys.test', 'Tercera123')).datos?.token;
+  const simultaneos = await Promise.all([
+    pedir('PATCH', '/api/auth/contrasena', 'simA', { contrasena_actual: 'Tercera123', contrasena_nueva: 'CuartaA123' }),
+    pedir('PATCH', '/api/auth/contrasena', 'simB', { contrasena_actual: 'Tercera123', contrasena_nueva: 'CuartaB123' })
+  ]);
+  igual('cambios simultáneos: un 200 y un 400', simultaneos.map(r => r.status).sort(), [200, 400]);
+  igual('cambios simultáneos: la versión sube una sola vez (3)', await versionDe(idR), 3);
+  const ganador = simultaneos.find(r => r.status === 200);
+  TOKENS.ganador = ganador?.datos?.token;
+  await esperar('solo vale el token del cambio que ganó -> 200', 200, 'GET', '/api/inventario', 'ganador');
+  await esperar('los tokens previos a la carrera ya no valen -> 401', 401, 'GET', '/api/inventario', simultaneos[0].status === 200 ? 'simB' : 'simA');
+
+  // Desactivación y reactivación
+  const versionAntesDesactivar = await versionDe(idR);
+  await esperar('admin desactiva la cuenta -> 200', 200, 'PATCH', `/api/usuarios/${idR}/estado`, 'admin', { estado: false });
+  igual('desactivar sube la versión', await versionDe(idR), versionAntesDesactivar + 1);
+  await esperar('desactivar de nuevo (idempotente) -> 200', 200, 'PATCH', `/api/usuarios/${idR}/estado`, 'admin', { estado: false });
+  igual('desactivar una cuenta ya desactivada no vuelve a subir la versión', await versionDe(idR), versionAntesDesactivar + 1);
+  await esperar('cuenta desactivada: su token -> 401', 401, 'GET', '/api/inventario', 'ganador');
+  await esperar('admin reactiva la cuenta -> 200', 200, 'PATCH', `/api/usuarios/${idR}/estado`, 'admin', { estado: true });
+  igual('reactivar no cambia la versión', await versionDe(idR), versionAntesDesactivar + 1);
+  const trasReactivar = await esperar('tras reactivar, el token anterior no vuelve a valer -> 401', 401, 'GET', '/api/inventario', 'ganador');
+  igual('mensaje de sesión no válida tras reactivar', trasReactivar?.error, 'La sesión ya no es válida. Inicia sesión nuevamente.');
+  const contrasenaGanadora = simultaneos[0].status === 200 ? 'CuartaA123' : 'CuartaB123';
+  TOKENS.reactivada = (await login('revocacion@pansys.test', contrasenaGanadora)).datos?.token;
+  await esperar('nuevo login tras reactivar -> 200', 200, 'GET', '/api/inventario', 'reactivada');
+
+  // Editar rol o email no revoca la sesión (los permisos ya se leen de la base)
+  const versionAntesEditar = await versionDe(idR);
+  await esperar('admin cambia rol y email -> 200', 200, 'PATCH', `/api/usuarios/${idR}`, 'admin', { rol_id: 3, email: 'revocacion2@pansys.test' });
+  igual('editar no cambia la versión', await versionDe(idR), versionAntesEditar);
+  await esperar('la sesión sigue activa con el rol nuevo (lectura) -> 200', 200, 'GET', '/api/inventario', 'reactivada');
+  await esperar('y con los permisos del rol nuevo (gerente no vende) -> 403', 403, 'POST', '/api/ventas', 'reactivada', {});
+
+  // La versión nunca se expone en los listados
+  const listado = (await pedir('GET', '/api/usuarios', 'admin')).datos ?? [];
+  igual('GET /api/usuarios no expone version_sesion', listado.some(c => 'version_sesion' in c), false);
+  await restaurarSemilla();
 
   // ---------- Contratos existentes ----------
   console.log('\n== Contratos existentes');

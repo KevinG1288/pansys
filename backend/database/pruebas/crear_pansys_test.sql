@@ -1,7 +1,12 @@
 -- =====================================================================================
 -- Pansys - Base de datos de PRUEBAS (pansys_test)
 -- =====================================================================================
--- Generado a partir de SHOW CREATE TABLE de pansys_db (esquema tras 001 y 002), sin datos.
+-- TIPO: creación de una base de pruebas NUEVA, con el esquema completo y la semilla mínima.
+--   Ya incluye 003 y 004: NO aplique después pruebas/003_*.sql ni pruebas/004_*.sql sobre ella.
+--
+-- Generado a partir de SHOW CREATE TABLE de pansys_db (esquema tras 001, 002, 003 y 004), sin datos.
+-- 003: materia_prima.cantidad_disponible, stock_minimo y precio_unitario son DECIMAL(12,4).
+-- 004: usuarios.version_sesion INT UNSIGNED NOT NULL DEFAULT 0 (revocación de sesiones).
 -- Ejecutar manualmente en MySQL Workbench. Solo crea y usa pansys_test; no toca pansys_db.
 --
 -- Si pansys_test ya existe, CREATE DATABASE falla a propósito. Para recrearla desde cero,
@@ -34,6 +39,7 @@ CREATE TABLE `usuarios` (
   `rol_id` int NOT NULL,
   `panaderia_id` int DEFAULT NULL,
   `estado` tinyint(1) DEFAULT '1',
+  `version_sesion` int unsigned NOT NULL DEFAULT '0' COMMENT 'Se incrementa al cambiar la contraseña o desactivar la cuenta; invalida los JWT anteriores',
   `createdAt` datetime NOT NULL,
   `updatedAt` datetime NOT NULL,
   PRIMARY KEY (`id`),
@@ -120,9 +126,9 @@ CREATE TABLE `materia_prima` (
   `id` int NOT NULL AUTO_INCREMENT,
   `nombre` varchar(255) NOT NULL,
   `unidad_medida` varchar(255) NOT NULL,
-  `cantidad_disponible` float DEFAULT '0',
-  `stock_minimo` float DEFAULT '0',
-  `precio_unitario` float DEFAULT '0',
+  `cantidad_disponible` decimal(12,4) NOT NULL DEFAULT '0.0000',
+  `stock_minimo` decimal(12,4) NOT NULL DEFAULT '0.0000',
+  `precio_unitario` decimal(12,4) NOT NULL DEFAULT '0.0000',
   `panaderia_id` int NOT NULL,
   `estado` tinyint(1) DEFAULT '1',
   `createdAt` datetime NOT NULL,
@@ -275,3 +281,15 @@ SELECT DATABASE() AS base_actual;
 SELECT COUNT(*) AS tablas FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'pansys_test';
 SELECT (SELECT COUNT(*) FROM roles) AS roles, (SELECT COUNT(*) FROM usuarios) AS usuarios,
        (SELECT COUNT(*) FROM panaderias) AS panaderias;
+
+-- Esperado: decimal(12,4) | NO | 0.0000 en las tres columnas (SQL 003)
+SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'pansys_test' AND TABLE_NAME = 'materia_prima'
+  AND COLUMN_NAME IN ('cantidad_disponible', 'stock_minimo', 'precio_unitario')
+ORDER BY ORDINAL_POSITION;
+
+-- Esperado: version_sesion | int unsigned | NO | 0 (SQL 004)
+SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = 'pansys_test' AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'version_sesion';

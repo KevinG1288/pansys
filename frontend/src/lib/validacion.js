@@ -3,6 +3,9 @@
 
 const MENSAJE_OBLIGATORIO = 'Este campo es obligatorio';
 
+// Máximo de las columnas DECIMAL(12,4) de materia_prima (cantidades y precio), igual que el backend
+export const MAXIMO_DECIMAL_12_4 = 99999999.9999;
+
 // Texto: recorta los espacios de los extremos
 export const leerTexto = (entrada, { obligatorio = true, maximo = 255 } = {}) => {
   const texto = typeof entrada === 'string' ? entrada.trim() : '';
@@ -28,7 +31,7 @@ export const leerNumero = (entrada, { decimales = 4, entero = false, maximo = In
   }
 
   const numero = Number(texto.replace(',', '.'));
-  if (numero > maximo) return { error: `No puede superar ${maximo.toLocaleString('es-CO')}` };
+  if (numero > maximo) return { error: `No puede superar ${maximo.toLocaleString('es-CO', { maximumFractionDigits: 4 })}` };
   return { valor: numero };
 };
 

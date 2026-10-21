@@ -189,7 +189,7 @@ const Cuentas = () => {
 
         <Panel
           titulo="Cuentas registradas"
-          descripcion="Una cuenta desactivada no puede iniciar sesión y sus sesiones abiertas dejan de funcionar. Su historial se conserva."
+          descripcion="Una cuenta desactivada no puede iniciar sesión y sus sesiones abiertas se cierran. Su historial se conserva."
         >
           {errorCuentas ? (
             <div className="px-5 pb-5"><Aviso tipo="error">{errorCuentas}</Aviso></div>
@@ -333,7 +333,7 @@ const Cuentas = () => {
       {desactivando && (
         <DialogoConfirmacion
           titulo="¿Desactivar esta cuenta?"
-          descripcion={`«${desactivando.email}» no podrá iniciar sesión y sus sesiones abiertas dejarán de funcionar. Podrás reactivarla después.`}
+          descripcion={`«${desactivando.email}» no podrá iniciar sesión y sus sesiones abiertas se cerrarán. Si la reactivas, tendrá que iniciar sesión de nuevo.`}
           textoConfirmar="Desactivar cuenta"
           confirmando={cambiandoEstado === desactivando.id}
           error={errorEstado}

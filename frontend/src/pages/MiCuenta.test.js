@@ -32,17 +32,41 @@ afterEach(() => {
 });
 
 test.each([['panadero', PANADERO], ['gerente', GERENTE]])('un %s cambia su contraseña con PATCH /api/auth/contrasena', async (_, usuario) => {
-  api.patch.mockResolvedValueOnce({ data: { mensaje: 'Contraseña actualizada correctamente' } });
+  api.patch.mockResolvedValueOnce({ data: { mensaje: 'Contraseña actualizada correctamente', token: 'token-nuevo' } });
   renderizar(usuario);
 
   expect(screen.getByText(usuario.email)).toBeInTheDocument();
   llenar({ actual: 'Anterior2025', nueva: 'Nueva2026' });
   enviar();
 
-  expect(await screen.findByText('Contraseña actualizada. Úsala la próxima vez que inicies sesión.')).toBeInTheDocument();
+  expect(await screen.findByText('Contraseña actualizada. Las sesiones abiertas en otros dispositivos se cerraron.')).toBeInTheDocument();
   expect(api.patch).toHaveBeenCalledWith('/api/auth/contrasena', { contrasena_actual: 'Anterior2025', contrasena_nueva: 'Nueva2026' });
+  // Este dispositivo sigue conectado con el token nuevo; el usuario mostrado no cambia
+  expect(localStorage.getItem('token')).toBe('token-nuevo');
+  expect(JSON.parse(localStorage.getItem('usuario'))).toEqual(usuario);
   expect(screen.getByLabelText('Contraseña actual')).toHaveValue('');
   expect(screen.getByLabelText('Contraseña nueva')).toHaveValue('');
+});
+
+test('si la respuesta no trae token (backend anterior), conserva la sesión sin romperse', async () => {
+  api.patch.mockResolvedValueOnce({ data: { mensaje: 'Contraseña actualizada correctamente' } });
+  renderizar();
+
+  llenar({ actual: 'Anterior2025', nueva: 'Nueva2026' });
+  enviar();
+
+  expect(await screen.findByText('Contraseña actualizada. Úsala la próxima vez que inicies sesión.')).toBeInTheDocument();
+  expect(localStorage.getItem('token')).toBe('token-de-prueba');
+});
+
+test('un 401 por sesión revocada muestra el mensaje del backend', async () => {
+  api.patch.mockRejectedValueOnce({ response: { status: 401, data: { error: 'La sesión ya no es válida. Inicia sesión nuevamente.' } } });
+  renderizar();
+
+  llenar({ actual: 'Anterior2025', nueva: 'Nueva2026' });
+  enviar();
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('La sesión ya no es válida.');
 });
 
 test('valida antes de enviar: actual obligatoria, política, igual a la actual y confirmación', () => {

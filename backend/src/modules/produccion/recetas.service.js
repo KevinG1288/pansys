@@ -2,7 +2,7 @@ const { sequelize, Producto, MateriaPrima, RecetaProducto } = require('../../mod
 const { ErrorNegocio } = require('../../utils/errores');
 const { enTransaccion } = require('../../utils/transaccion');
 const {
-  MAX_CANTIDAD_ORDEN, MAX_UNIDADES, aUnidades, deUnidades, aDecimal4,
+  MAX_CANTIDAD_ORDEN, MAX_UNIDADES, aUnidades, deUnidades, aDecimal4, diezmilesimasACentavos,
   parsearId, parsearEntero, parsearCantidad
 } = require('./produccion.validaciones');
 
@@ -10,15 +10,17 @@ const MAX_INSUMOS_RECETA = 50;
 
 // Costos en centavos enteros (BigInt): 9.999.999.999,99 = máximo de DECIMAL(12,2)
 const MAX_CENTAVOS = 999999999999n;
-const DIEZMILESIMAS = 10000n;
 
-// materia_prima usa FLOAT: MySQL lo entrega con ~6 dígitos significativos, por eso las
-// cantidades y precios se leen convertidos a DECIMAL para validar con el valor real.
+// cantidad (diezmilésimas) × precio (diezmilésimas) = importe en cienmillonésimas; / 10^6 = centavos
+const CIENMILLONESIMAS_POR_CENTAVO = 1000000n;
+
+// materia_prima guarda cantidades y precio en DECIMAL(12,4): se leen tal cual (exactos, con sus
+// 4 decimales) y se operan en diezmilésimas enteras, sin redondear el precio antes de calcular.
 const ATRIBUTOS_MATERIA_EXACTOS = [
   'id', 'nombre', 'unidad_medida', 'panaderia_id', 'estado',
-  [sequelize.literal('CAST(`cantidad_disponible` AS DECIMAL(16,4))'), 'disponible'],
-  [sequelize.literal('CAST(`stock_minimo` AS DECIMAL(16,4))'), 'minimo'],
-  [sequelize.literal('CAST(`precio_unitario` AS DECIMAL(14,2))'), 'precio']
+  ['cantidad_disponible', 'disponible'],
+  ['stock_minimo', 'minimo'],
+  ['precio_unitario', 'precio']
 ];
 
 // Valida { insumos: [{ materia_prima_id, cantidad_por_unidad }] }
@@ -198,13 +200,13 @@ class RecetasService {
       });
     }
 
-    // Inventario no valida precios: uno negativo (o que no cabe en DECIMAL(12,2)) violaría
-    // las restricciones de insumo_usado, así que se rechaza antes de descontar nada
-    const preciosCentavos = new Map(materias.map(m => [m.id, BigInt(Math.round(Number(m.get('precio')) * 100))]));
+    // Inventario ya rechaza precios negativos, pero pueden existir datos anteriores: un precio
+    // negativo violaría las restricciones de insumo_usado, así que se rechaza antes de descontar
+    const preciosUnidades = new Map(materias.map(m => [m.id, BigInt(aUnidades(m.get('precio')))]));
     const preciosInvalidos = lineas
       .filter(l => {
-        const centavos = preciosCentavos.get(l.materia_prima_id);
-        return centavos < 0n || centavos > MAX_CENTAVOS;
+        const precio = preciosUnidades.get(l.materia_prima_id);
+        return precio < 0n || diezmilesimasACentavos(precio) > MAX_CENTAVOS;
       })
       .map(l => l.materia_prima_id);
     if (preciosInvalidos.length > 0) {
@@ -223,8 +225,10 @@ class RecetasService {
         throw new ErrorNegocio('La cantidad solicitada supera el máximo permitido', 400);
       }
 
-      // costo = necesario (diezmilésimas) × precio (centavos) / 10000, redondeado a centavos
-      const costoCentavos = (BigInt(necesario) * preciosCentavos.get(m.id) + DIEZMILESIMAS / 2n) / DIEZMILESIMAS;
+      // costo = necesario × precio, ambos exactos en diezmilésimas; se redondea una sola vez,
+      // a centavos (mitad hacia arriba), porque es la precisión con la que se guarda cada línea
+      const precio = preciosUnidades.get(m.id);
+      const costoCentavos = (BigInt(necesario) * precio + CIENMILLONESIMAS_POR_CENTAVO / 2n) / CIENMILLONESIMAS_POR_CENTAVO;
       costoTotalCentavos += costoCentavos;
 
       const disponible = aUnidades(m.get('disponible'));
@@ -238,6 +242,8 @@ class RecetasService {
         minimo: aUnidades(m.get('minimo')),
         faltante: Math.max(necesario - disponible, 0),
         precio: Number(m.get('precio')),
+        // insumo_usado.precio_unitario es DECIMAL(12,2): su copia histórica se redondea a centavos
+        precioCopiaCentavos: diezmilesimasACentavos(precio),
         costoCentavos,
         costo: Number(costoCentavos) / 100
       };

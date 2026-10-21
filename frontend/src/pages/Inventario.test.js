@@ -194,7 +194,7 @@ describe('Crear insumo', () => {
     await renderizar();
 
     userEvent.click(screen.getByRole('button', { name: 'Nuevo insumo' }));
-    llenarFormulario({ nombre: '   ', unidad: 'kg', cantidad: '-3', minimo: '1.23456', precio: '10.999' });
+    llenarFormulario({ nombre: '   ', unidad: 'kg', cantidad: '-3', minimo: '1.23456', precio: '10.99999' });
     userEvent.click(screen.getByRole('button', { name: 'Guardar insumo' }));
 
     expect(api.post).not.toHaveBeenCalled();
@@ -277,6 +277,73 @@ describe('Editar insumo', () => {
 
     expect(screen.queryByRole('heading', { name: 'Editar «Azúcar»' })).not.toBeInTheDocument();
     expect(api.put).not.toHaveBeenCalled();
+  });
+});
+
+describe('Precisión DECIMAL(12,4) de cantidades y precio', () => {
+  test('acepta 4 decimales también en el precio y valores en el máximo de la columna', async () => {
+    api.post.mockResolvedValueOnce({ data: { id: 11 } });
+    await renderizar();
+
+    userEvent.click(screen.getByRole('button', { name: 'Nuevo insumo' }));
+    llenarFormulario({ nombre: 'Vainilla', unidad: 'ml', cantidad: '99999999,9999', minimo: '0,0001', precio: '12,3456' });
+    userEvent.click(screen.getByRole('button', { name: 'Guardar insumo' }));
+
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1));
+    expect(api.post).toHaveBeenCalledWith('/api/inventario', {
+      nombre: 'Vainilla',
+      unidad_medida: 'ml',
+      cantidad_disponible: 99999999.9999,
+      stock_minimo: 0.0001,
+      precio_unitario: 12.3456,
+      panaderia_id: 1
+    });
+  });
+
+  test('rechaza valores por encima de 99.999.999,9999 o con más de 4 decimales, como el backend', async () => {
+    await renderizar();
+
+    userEvent.click(screen.getByRole('button', { name: 'Nuevo insumo' }));
+    llenarFormulario({ nombre: 'Vainilla', unidad: 'ml', cantidad: '100000000', minimo: '0', precio: '100000000' });
+    userEvent.click(screen.getByRole('button', { name: 'Guardar insumo' }));
+
+    expect(api.post).not.toHaveBeenCalled();
+    expect(campo('Cantidad disponible')).toHaveAttribute('aria-invalid', 'true');
+    expect(campo('Precio unitario (COP)')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getAllByText('No puede superar 99.999.999,9999')).toHaveLength(2);
+
+    escribir('Cantidad disponible', '1');
+    escribir('Precio unitario (COP)', '0,00001');
+    userEvent.click(screen.getByRole('button', { name: 'Guardar insumo' }));
+    expect(api.post).not.toHaveBeenCalled();
+    expect(campo('Precio unitario (COP)')).toHaveAttribute('aria-invalid', 'true');
+  });
+
+  test('editar un insumo con precio de 4 decimales no lo redondea', async () => {
+    api.get.mockResolvedValue({ data: [...INSUMOS,
+      insumo({ id: 12, nombre: 'Esencia', unidad_medida: 'ml', cantidad_disponible: 0.0001, stock_minimo: 0, precio_unitario: 0.0125 })] });
+    api.put.mockResolvedValueOnce({ data: {} });
+    await renderizar();
+
+    userEvent.click(screen.getByRole('button', { name: 'Editar Esencia' }));
+    expect(campo('Cantidad disponible')).toHaveValue('0.0001');
+    expect(campo('Precio unitario (COP)')).toHaveValue('0.0125');
+    userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1));
+    expect(api.put).toHaveBeenCalledWith('/api/inventario/12', expect.objectContaining({
+      cantidad_disponible: 0.0001,
+      precio_unitario: 0.0125
+    }));
+  });
+
+  test('la tabla muestra el precio unitario con sus decimales', async () => {
+    api.get.mockResolvedValue({ data: [...INSUMOS,
+      insumo({ id: 12, nombre: 'Esencia', unidad_medida: 'ml', cantidad_disponible: 5, stock_minimo: 0, precio_unitario: 0.0125 })] });
+    await renderizar();
+
+    expect(within(fila('Esencia')).getByText(/0,0125/)).toBeInTheDocument();
+    expect(within(fila('Harina de trigo')).getByText(/3\.000/)).toBeInTheDocument();
   });
 });
 

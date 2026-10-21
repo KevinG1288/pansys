@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { mensajeError } from '../../lib/errores';
-import { leerNumero, leerTexto, validar } from '../../lib/validacion';
+import { leerNumero, leerTexto, MAXIMO_DECIMAL_12_4, validar } from '../../lib/validacion';
 import Aviso from '../ui/Aviso';
 import Boton from '../ui/Boton';
 import Campo from '../ui/Campo';
@@ -8,25 +8,28 @@ import { Panel } from '../ui/Panel';
 
 const CAMPOS = ['nombre', 'unidad_medida', 'cantidad_disponible', 'stock_minimo', 'precio_unitario'];
 
-// Mismos límites acordados para el POST y el PUT de /api/inventario
+// Mismos límites que valida el backend en el POST y el PUT de /api/inventario: las tres columnas
+// son DECIMAL(12,4), de 0 a 99.999.999,9999 con máximo 4 decimales (también el precio)
+const REGLA_DECIMAL = (v) => leerNumero(v, { decimales: 4, maximo: MAXIMO_DECIMAL_12_4 });
 const REGLAS = {
   nombre: (v) => leerTexto(v),
   unidad_medida: (v) => leerTexto(v),
-  cantidad_disponible: (v) => leerNumero(v, { decimales: 4, maximo: 1000000 }),
-  stock_minimo: (v) => leerNumero(v, { decimales: 4, maximo: 1000000 }),
-  precio_unitario: (v) => leerNumero(v, { decimales: 2, maximo: 100000000 })
+  cantidad_disponible: REGLA_DECIMAL,
+  stock_minimo: REGLA_DECIMAL,
+  precio_unitario: REGLA_DECIMAL
 };
 
-// Valor numérico del backend como texto editable, con la precisión que admite el formulario
-const comoTexto = (valor, decimales) =>
-  valor === null || valor === undefined ? '' : String(Number(Number(valor).toFixed(decimales)));
+// Valor numérico del backend como texto editable. Con 4 decimales no se pierde nada: es la
+// precisión de la columna, así que editar y guardar no redondea el valor existente.
+const comoTexto = (valor) =>
+  valor === null || valor === undefined ? '' : String(Number(Number(valor).toFixed(4)));
 
 const valoresIniciales = (insumo) => ({
   nombre: insumo?.nombre ?? '',
   unidad_medida: insumo?.unidad_medida ?? '',
-  cantidad_disponible: insumo ? comoTexto(insumo.cantidad_disponible, 4) : '',
-  stock_minimo: insumo ? comoTexto(insumo.stock_minimo, 4) : '',
-  precio_unitario: insumo ? comoTexto(insumo.precio_unitario, 2) : ''
+  cantidad_disponible: insumo ? comoTexto(insumo.cantidad_disponible) : '',
+  stock_minimo: insumo ? comoTexto(insumo.stock_minimo) : '',
+  precio_unitario: insumo ? comoTexto(insumo.precio_unitario) : ''
 });
 
 // Formulario de alta y edición. Valida, convierte (textos recortados y números JSON)
@@ -136,7 +139,7 @@ const FormularioInsumo = ({ insumo, onGuardar, onCancelar }) => {
             value={valores.precio_unitario}
             onChange={cambiar('precio_unitario')}
             error={errores.precio_unitario}
-            ayuda="Hasta 2 decimales"
+            ayuda="Hasta 4 decimales"
           />
         </div>
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">

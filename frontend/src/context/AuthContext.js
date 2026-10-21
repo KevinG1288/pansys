@@ -29,6 +29,12 @@ export const AuthProvider = ({ children }) => {
     setUsuario(null);
   }, []);
 
+  // Sustituye el token de la sesión actual por uno nuevo (tras cambiar la contraseña, el backend
+  // invalida los anteriores y entrega otro a este dispositivo). No cambia el usuario mostrado.
+  const renovarToken = useCallback((token) => {
+    localStorage.setItem('token', token);
+  }, []);
+
   // Actualiza los datos mostrados de la sesión (p. ej. el email propio editado en Cuentas)
   const actualizarUsuario = useCallback((cambios) => {
     setUsuario(actual => {
@@ -46,7 +52,7 @@ export const AuthProvider = ({ children }) => {
   }), [logout]);
 
   return (
-    <AuthContext.Provider value={{ usuario, login, logout, actualizarUsuario, avisoSesion }}>
+    <AuthContext.Provider value={{ usuario, login, logout, actualizarUsuario, renovarToken, avisoSesion }}>
       {children}
     </AuthContext.Provider>
   );

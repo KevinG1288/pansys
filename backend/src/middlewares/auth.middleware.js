@@ -1,11 +1,15 @@
 const jwt = require('jsonwebtoken');
 const { Usuario, Rol } = require('../models/index');
+const { versionDelToken } = require('../utils/sesion');
 
-// Autentica la petición. El token solo identifica a la cuenta (id): rol, panadería, email y
-// estado se leen de la base de datos en cada petición, así un cambio de rol, de panadería o
-// una desactivación tienen efecto inmediato aunque el token siga vigente.
+// Autentica la petición. El token solo identifica a la cuenta (id) y su versión de sesión:
+// rol, panadería, email y estado se leen de la base de datos en cada petición, así un cambio
+// de rol, de panadería o una desactivación tienen efecto inmediato aunque el token siga vigente.
+// La versión de sesión (usuarios.version_sesion) sube al cambiar la contraseña o desactivar la
+// cuenta: un token con otra versión ya no es válido.
 // 401 = autenticación no válida (sin token, token inválido o caducado, cuenta inexistente o
-// desactivada): el frontend cierra la sesión. Los permisos insuficientes son 403 (roles.middleware).
+// desactivada, sesión revocada): el frontend cierra la sesión. Los permisos insuficientes son
+// 403 (roles.middleware).
 const verificarToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -24,15 +28,21 @@ const verificarToken = async (req, res, next) => {
     return res.status(401).json({ error: mensaje });
   }
 
+  const versionToken = versionDelToken(decoded);
+  if (!Number.isInteger(decoded?.id) || versionToken === null) {
+    return res.status(401).json({ error: 'Token inválido' });
+  }
+
   try {
-    const usuario = Number.isInteger(decoded?.id)
-      ? await Usuario.findByPk(decoded.id, {
-        attributes: ['id', 'email', 'rol_id', 'panaderia_id', 'estado'],
-        include: [{ model: Rol, attributes: ['nombre'] }]
-      })
-      : null;
+    const usuario = await Usuario.findByPk(decoded.id, {
+      attributes: ['id', 'email', 'rol_id', 'panaderia_id', 'estado', 'version_sesion'],
+      include: [{ model: Rol, attributes: ['nombre'] }]
+    });
     if (!usuario || !usuario.estado) {
       return res.status(401).json({ error: 'La cuenta no está activa. Inicia sesión con una cuenta activa.' });
+    }
+    if (usuario.version_sesion !== versionToken) {
+      return res.status(401).json({ error: 'La sesión ya no es válida. Inicia sesión nuevamente.' });
     }
 
     // Mismos campos que el token emitido por /login, con los valores actuales

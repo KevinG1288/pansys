@@ -28,6 +28,13 @@ const Usuario = sequelize.define('Usuario', {
   estado: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  // SQL 004: sube al cambiar la contraseña o desactivar la cuenta e invalida los JWT anteriores.
+  // Es un dato interno: no se devuelve en ninguna respuesta.
+  version_sesion: {
+    type: DataTypes.INTEGER.UNSIGNED,
+    allowNull: false,
+    defaultValue: 0
   }
 }, {
   tableName: 'usuarios',

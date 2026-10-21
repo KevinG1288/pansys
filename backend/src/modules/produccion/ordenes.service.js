@@ -6,7 +6,7 @@ const { ErrorNegocio } = require('../../utils/errores');
 const { enTransaccion } = require('../../utils/transaccion');
 const recetasService = require('./recetas.service');
 const {
-  ESTADOS_ORDEN, MAX_CANTIDAD_ORDEN, TOLERANCIA_FLOAT, aUnidades, deUnidades, aDecimal4, redondear2,
+  ESTADOS_ORDEN, MAX_CANTIDAD_ORDEN, MAX_UNIDADES, aUnidades, deUnidades, aDecimal4, centavosATexto,
   parsearId, parsearEntero, parsearCantidad, parsearTexto, parsearFecha, fechaHoy
 } = require('./produccion.validaciones');
 
@@ -103,7 +103,8 @@ class OrdenesService {
         });
       }
 
-      // Descuento atómico en MySQL (no se reescribe el FLOAT leído desde JavaScript)
+      // Descuento atómico en MySQL con valores exactos de 4 decimales: la condición vuelve a
+      // comprobar el stock sobre la fila bloqueada, sin tolerancias
       for (const n of necesidades) {
         const [afectadas] = await MateriaPrima.update(
           { cantidad_disponible: sequelize.literal(`GREATEST(cantidad_disponible - ${aDecimal4(n.necesario)}, 0)`) },
@@ -112,7 +113,7 @@ class OrdenesService {
               id: n.materia_prima_id,
               panaderia_id: producto.panaderia_id,
               estado: true,
-              cantidad_disponible: { [Op.gte]: deUnidades(n.necesario) - TOLERANCIA_FLOAT }
+              cantidad_disponible: { [Op.gte]: aDecimal4(n.necesario) }
             },
             transaction: t
           }
@@ -129,7 +130,8 @@ class OrdenesService {
         fecha: fechaHoy(),
         cantidad_planificada: cantidad,
         estado: 'en_proceso',
-        costo_insumos: redondear2(necesidades.reduce((acc, n) => acc + n.costo, 0)).toFixed(2),
+        // Suma exacta de los costos por línea, que ya están redondeados a centavos
+        costo_insumos: centavosATexto(necesidades.reduce((acc, n) => acc + n.costoCentavos, 0n)),
         observaciones
       }, { transaction: t });
 
@@ -139,9 +141,9 @@ class OrdenesService {
         materia_prima_id: n.materia_prima_id,
         cantidad_por_unidad: aDecimal4(n.porUnidad),
         unidad_medida: n.unidad_medida,
-        precio_unitario: n.precio.toFixed(2),
+        precio_unitario: centavosATexto(n.precioCopiaCentavos),
         cantidad_usada: aDecimal4(n.necesario),
-        costo: n.costo.toFixed(2)
+        costo: centavosATexto(n.costoCentavos)
       })), { transaction: t });
 
       return { ordenId: orden.id, materiaIds: necesidades.map(n => n.materia_prima_id) };
@@ -158,8 +160,8 @@ class OrdenesService {
       where: { id: materiaIds },
       attributes: [
         'id', 'nombre', 'unidad_medida',
-        [sequelize.literal('CAST(`cantidad_disponible` AS DECIMAL(16,4))'), 'disponible'],
-        [sequelize.literal('CAST(`stock_minimo` AS DECIMAL(16,4))'), 'minimo']
+        ['cantidad_disponible', 'disponible'],
+        ['stock_minimo', 'minimo']
       ],
       order: [['id', 'ASC']]
     });
@@ -300,11 +302,23 @@ class OrdenesService {
 
         if (devuelta > 0) {
           algunaDevuelta = true;
+          // DECIMAL(12,4) no admite más de 99.999.999,9999: la condición evita que MySQL rechace
+          // la suma con un error de rango (y que la cancelación termine en un 500)
+          const donde = { id: insumo.materia_prima_id, panaderia_id: orden.panaderia_id };
           const [afectadas] = await MateriaPrima.update(
             { cantidad_disponible: sequelize.literal(`cantidad_disponible + ${aDecimal4(devuelta)}`) },
-            { where: { id: insumo.materia_prima_id, panaderia_id: orden.panaderia_id }, transaction: t }
+            {
+              where: { ...donde, cantidad_disponible: { [Op.lte]: aDecimal4(MAX_UNIDADES - devuelta) } },
+              transaction: t
+            }
           );
           if (afectadas !== 1) {
+            if (await MateriaPrima.count({ where: donde, transaction: t }) === 1) {
+              throw new ErrorNegocio(
+                `Devolver los insumos superaría el máximo de inventario (99.999.999,9999) para la materia prima ${insumo.materia_prima_id}`,
+                409, { materia_prima_id: insumo.materia_prima_id }
+              );
+            }
             throw new Error(`Materia prima ${insumo.materia_prima_id} de la orden ${orden.id} no encontrada en su panadería`);
           }
         }

@@ -213,3 +213,60 @@ describe('actualizarUsuario', () => {
     expect(localStorage.getItem('token')).toBe('token-actual');
   });
 });
+
+describe('renovarToken (cambio de contraseña con version_sesion)', () => {
+  // Botón que renueva el token como lo hace Mi cuenta tras PATCH /api/auth/contrasena
+  const AplicacionConRenovacion = () => {
+    const { usuario, renovarToken } = useAuth();
+    return usuario
+      ? (
+        <>
+          <p>Sesión de {usuario.email}</p>
+          <button type="button" onClick={() => renovarToken('token-renovado')}>Renovar</button>
+        </>
+      )
+      : <Login />;
+  };
+
+  const iniciarConRenovacion = () => {
+    localStorage.setItem('token', 'token-anterior');
+    localStorage.setItem('usuario', JSON.stringify(USUARIO));
+    render(<AuthProvider><AplicacionConRenovacion /></AuthProvider>);
+  };
+
+  test('las peticiones siguientes envían el token nuevo y la sesión sigue abierta', async () => {
+    simularRed({ '/api/inventario': [200, []] });
+    iniciarConRenovacion();
+
+    act(() => screen.getByRole('button', { name: 'Renovar' }).click());
+    await pedir(() => api.get('/api/inventario'));
+
+    expect(enviados[0].token).toBe('Bearer token-renovado');
+    expect(localStorage.getItem('token')).toBe('token-renovado');
+    expect(JSON.parse(localStorage.getItem('usuario'))).toEqual(USUARIO);
+    expect(screen.getByText('Sesión de panadero@pansys.com')).toBeInTheDocument();
+  });
+
+  test('un 401 tardío de una petición hecha con el token anterior no cierra la sesión renovada', async () => {
+    // La petición sale con el token anterior y, mientras está en curso, se renueva el token
+    simularRed({ '/api/ventas': [401, { error: 'La sesión ya no es válida. Inicia sesión nuevamente.' }] },
+      () => localStorage.setItem('token', 'token-renovado'));
+    iniciarConRenovacion();
+
+    await pedir(() => api.get('/api/ventas'));
+
+    expect(enviados[0].token).toBe('Bearer token-anterior');
+    expect(localStorage.getItem('token')).toBe('token-renovado');
+    expect(screen.getByText('Sesión de panadero@pansys.com')).toBeInTheDocument();
+  });
+
+  test('en otro dispositivo (token revocado), el 401 cierra la sesión y explica el motivo', async () => {
+    simularRed({ '/api/inventario': [401, { error: 'La sesión ya no es válida. Inicia sesión nuevamente.' }] });
+    iniciarConRenovacion();
+
+    await pedir(() => api.get('/api/inventario'));
+
+    expect(localStorage.getItem('token')).toBeNull();
+    expect(screen.getByRole('status')).toHaveTextContent('La sesión ya no es válida. Inicia sesión nuevamente.');
+  });
+});

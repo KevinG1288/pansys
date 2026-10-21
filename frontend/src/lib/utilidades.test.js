@@ -1,13 +1,20 @@
 import { mensajeError } from './errores';
-import { diaEnBogota, esHoyEnBogota, fechaHoraCorta, formatCOP, formatNumber } from './formato';
+import { diaEnBogota, esHoyEnBogota, fechaHoraCorta, formatCOP, formatNumber, formatPrecio } from './formato';
 import { puedeEscribir, ROLES } from './permisos';
-import { leerNumero, leerTexto, validar } from './validacion';
+import { leerNumero, leerTexto, MAXIMO_DECIMAL_12_4, validar } from './validacion';
 
 describe('formato', () => {
   test('formatCOP muestra pesos colombianos sin decimales', () => {
     expect(formatCOP(3000)).toMatch(/^\$\s?3\.000$/);
     expect(formatCOP(25800.4)).toMatch(/^\$\s?25\.800$/);
     expect(formatCOP(0)).toMatch(/^\$\s?0$/);
+  });
+
+  test('formatPrecio muestra los decimales del precio, hasta 4', () => {
+    expect(formatPrecio(3000)).toMatch(/^\$\s?3\.000$/);
+    expect(formatPrecio(0.0125)).toMatch(/^\$\s?0,0125$/);
+    expect(formatPrecio(12.3456)).toMatch(/^\$\s?12,3456$/);
+    expect(formatPrecio(99999999.9999)).toMatch(/^\$\s?99\.999\.999,9999$/);
   });
 
   test('formatNumber usa coma decimal y hasta 4 decimales', () => {
@@ -123,6 +130,13 @@ describe('leerNumero', () => {
   test('respeta el máximo', () => {
     expect(leerNumero('1000000', { maximo: 1000000 })).toEqual({ valor: 1000000 });
     expect(leerNumero('1000000.5', { maximo: 1000000 })).toHaveProperty('error');
+  });
+
+  test('máximo de DECIMAL(12,4): 99.999.999,9999 entra; 100.000.000 no, con el límite bien escrito', () => {
+    expect(MAXIMO_DECIMAL_12_4).toBe(99999999.9999);
+    expect(leerNumero('99999999,9999', { maximo: MAXIMO_DECIMAL_12_4 })).toEqual({ valor: 99999999.9999 });
+    expect(leerNumero('100000000', { maximo: MAXIMO_DECIMAL_12_4 })).toEqual({ error: 'No puede superar 99.999.999,9999' });
+    expect(leerNumero('0.0001', { maximo: MAXIMO_DECIMAL_12_4 })).toEqual({ valor: 0.0001 });
   });
 });
 

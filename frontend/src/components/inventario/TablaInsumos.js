@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { PackageSearch, Pencil, Trash2 } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { formatCOP, formatNumber } from '../../lib/formato';
+import { formatNumber, formatPrecio } from '../../lib/formato';
 import { estiloControl } from '../ui/Campo';
 import Boton from '../ui/Boton';
 import EstadoVacio from '../ui/EstadoVacio';
@@ -150,7 +150,7 @@ const TablaInsumos = ({ insumos, puedeEditar, descritoPor, onEditar, onEliminar 
                   <TablaCelda className="text-right tabular-nums">
                     {formatNumber(insumo.stock_minimo)} <span className="text-muted-foreground">{insumo.unidad_medida}</span>
                   </TablaCelda>
-                  <TablaCelda className="text-right tabular-nums">{formatCOP(insumo.precio_unitario)}</TablaCelda>
+                  <TablaCelda className="text-right tabular-nums">{formatPrecio(insumo.precio_unitario)}</TablaCelda>
                   <TablaCelda>
                     <StatusBadge tono={estado.tono}>{estado.etiqueta}</StatusBadge>
                   </TablaCelda>

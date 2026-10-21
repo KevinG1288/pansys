@@ -8,16 +8,14 @@ const MAX_CANTIDAD_ORDEN = 100000;
 const MAX_TEXTO = 500;
 const MAX_ID = 2147483647;
 
-// Tolerancia al comparar contra materia_prima.cantidad_disponible (FLOAT)
-const TOLERANCIA_FLOAT = 0.00005;
-
 const PATRON_ENTERO = /^\d+$/;
 const PATRON_DECIMAL = /^\d+(\.\d{1,4})?$/;
 const PATRON_FECHA = /^\d{4}-\d{2}-\d{2}$/;
 
 const ESTADOS_ORDEN = ['en_proceso', 'finalizada', 'cancelada'];
 
-// Convierte un valor leído de la BD (DECIMAL ya numérico o CAST) a diezmilésimas
+// Convierte un valor DECIMAL(12,4) leído de la BD (número exacto gracias a decimalNumbers)
+// a diezmilésimas. Hasta 12 dígitos el resultado es exacto: cabe en un entero seguro de JS.
 const aUnidades = (valor) => Math.round(Number(valor) * ESCALA);
 
 const deUnidades = (unidades) => unidades / ESCALA;
@@ -26,7 +24,12 @@ const deUnidades = (unidades) => unidades / ESCALA;
 const aDecimal4 = (unidades) =>
   `${Math.trunc(unidades / ESCALA)}.${String(unidades % ESCALA).padStart(4, '0')}`;
 
-const redondear2 = (valor) => Math.round(valor * 100) / 100;
+// Texto exacto con 2 decimales a partir de centavos (BigInt, >= 0): 1234n -> '12.34'
+const centavosATexto = (centavos) =>
+  `${centavos / 100n}.${String(centavos % 100n).padStart(2, '0')}`;
+
+// Redondeo a centavos (mitad hacia arriba) de un importe en diezmilésimas (BigInt, >= 0)
+const diezmilesimasACentavos = (unidades) => (unidades + 50n) / 100n;
 
 // Solo se aceptan números o textos numéricos (no listas, objetos ni booleanos)
 const comoTexto = (valor) =>
@@ -104,11 +107,11 @@ module.exports = {
   ESTADOS_ORDEN,
   MAX_CANTIDAD_ORDEN,
   MAX_UNIDADES,
-  TOLERANCIA_FLOAT,
   aUnidades,
   deUnidades,
   aDecimal4,
-  redondear2,
+  centavosATexto,
+  diezmilesimasACentavos,
   parsearId,
   parsearEntero,
   parsearCantidad,
