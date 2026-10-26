@@ -4,6 +4,15 @@
 //
 // Uso (desde backend/):  npm run test:produccion
 
+// ---------- DESHABILITADA TEMPORALMENTE POR SEGURIDAD ----------
+// Esta suite vaciaba siete tablas completas de pansys_test al arrancar, incluidos los datos de
+// la demo. Queda desactivada hasta su refactorización con pruebas/aislamiento.js (cuentas y
+// panaderías propias, limpieza solo de lo propio). Termina aquí, como primera instrucción: antes
+// de cargar dotenv, los modelos o el servidor, sin abrir conexiones ni escribir nada.
+console.error('Suite de Producción DESHABILITADA temporalmente por seguridad: borraba tablas completas de pansys_test. ' +
+  'No se ha conectado a ninguna base ni ha modificado datos. Se reactivará tras su refactorización.');
+process.exit(1);
+
 process.env.DB_NAME = 'pansys_test';
 process.env.PORT = process.env.PORT_PRUEBAS || '3101';
 require('dotenv').config({ quiet: true });
@@ -106,10 +115,10 @@ const main = async () => {
     throw new Error(`materia_prima de pansys_test no es DECIMAL(12,4) NOT NULL: ${JSON.stringify(tipos)}`);
   }
 
-  // ---------- Limpieza de datos de ejecuciones anteriores ----------
-  for (const tabla of ['insumo_usado', 'orden_produccion', 'receta_producto', 'detalle_ventas', 'ventas', 'productos', 'materia_prima']) {
-    await sequelize.query(`DELETE FROM \`${tabla}\``);
-  }
+  // ---------- Borrado global eliminado ----------
+  // Aquí se vaciaban siete tablas completas. Segunda barrera por si se quitara la salida del
+  // principio sin refactorizar la suite: se detiene antes de crear datos o arrancar el servidor.
+  throw new Error('Suite deshabilitada: falta refactorizarla con pruebas/aislamiento.js (el borrado global de tablas fue eliminado)');
 
   require('../src/app');
   await esperarServidor();

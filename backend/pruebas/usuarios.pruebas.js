@@ -8,6 +8,16 @@
 //
 // Uso (desde backend/):  node pruebas/usuarios.pruebas.js
 
+// ---------- DESHABILITADA TEMPORALMENTE POR SEGURIDAD ----------
+// Esta suite borraba todas las cuentas con id > 4 de pansys_test (incluidas las de la demo y las
+// cuentas temporales de otras suites), devolvía a '!' las contraseñas de las cuentas semilla y
+// limpiaba insumos por patrón de nombre. Queda desactivada hasta su refactorización con
+// pruebas/aislamiento.js. Termina aquí, como primera instrucción: antes de cargar dotenv, los
+// modelos o el servidor, sin abrir conexiones ni escribir nada.
+console.error('Suite de Cuentas DESHABILITADA temporalmente por seguridad: borraba cuentas ajenas y reiniciaba las cuentas semilla de pansys_test. ' +
+  'No se ha conectado a ninguna base ni ha modificado datos. Se reactivará tras su refactorización.');
+process.exit(1);
+
 process.env.DB_NAME = 'pansys_test';
 process.env.PORT = process.env.PORT_PRUEBAS || '3105';
 require('dotenv').config({ quiet: true });
@@ -94,14 +104,12 @@ const crearCuenta = async (email, contrasena, rol_id, panaderia_id) => {
   return r.datos.id;
 };
 
+// ---------- Limpieza global eliminada ----------
+// Aquí se borraban todas las cuentas con id > 4 y se devolvían las cuentas semilla a su estado
+// inicial (contraseña '!'). Segunda barrera por si se quitara la salida del principio sin
+// refactorizar la suite: se detiene antes de borrar o modificar ninguna cuenta.
 const restaurarSemilla = async () => {
-  await sequelize.query('DELETE FROM usuarios WHERE id > 4');
-  for (const u of SEMILLA) {
-    await sequelize.query(
-      "UPDATE usuarios SET email = ?, contrasena = '!', rol_id = ?, panaderia_id = ?, estado = 1, version_sesion = 0 WHERE id = ?",
-      { replacements: [u.email, u.rol_id, u.panaderia_id, u.id] }
-    );
-  }
+  throw new Error('Suite deshabilitada: falta refactorizarla con pruebas/aislamiento.js (el borrado global de cuentas y el reinicio de la semilla fueron eliminados)');
 };
 
 const esperarServidor = async () => {
@@ -524,11 +532,10 @@ const main = async () => {
 main()
   .catch(error => registrar(false, 'Ejecución abortada', error.message))
   .finally(async () => {
-    if (baseVerificada) {
-      await restaurarSemilla().catch(e => registrar(false, 'Restauración de la semilla', e.message));
-      await sequelize.query("DELETE FROM materia_prima WHERE nombre LIKE 'PRUEBA-SESION-%'")
-        .catch(e => registrar(false, 'Limpieza de insumos de prueba', e.message));
-    }
+    // Limpieza global eliminada: aquí se restauraba la semilla y se borraban insumos por patrón de
+    // nombre (LIKE 'PRUEBA-SESION-%'). No se borra ni se restaura nada; si se llegara aquí con
+    // datos creados, quedan para revisión manual.
+    if (baseVerificada) registrar(false, 'Suite deshabilitada: no se ejecuta ninguna limpieza global');
     const fallidas = resultados.filter(r => !r.ok).length;
     console.log(`\n${resultados.length - fallidas}/${resultados.length} pruebas correctas`);
     await sequelize.close().catch(() => {});
