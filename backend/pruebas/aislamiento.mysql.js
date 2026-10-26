@@ -1,4 +1,4 @@
-// Verificación de pruebas/aislamiento.js contra MySQL real (hipótesis V1-V10 del plan). Escribe
+// Verificación de pruebas/aislamiento.js contra MySQL real (hipótesis V1-V14 del plan). Escribe
 // SOLO filas propias en pansys_test, marcadas con su runId, y las borra únicamente mediante
 // ejecucion.limpiar(). Si la limpieza no termina en "limpia", se detiene: no reintenta ni borra
 // por otra vía, e indica qué comprobar a mano.
@@ -29,6 +29,12 @@ if (require.main === module) {
 
 const BASE = 'pansys_test';
 const BLOQUEO_V3 = 'pansys_test.verificacion_v3';
+// Niveles de aislamiento con los que la limpieza de aislamiento.js es correcta (V13 y V14)
+const NIVELES_ADMITIDOS = ['REPEATABLE-READ', 'READ-COMMITTED'];
+const LECTURA_SESION = 'SELECT @@SESSION.transaction_isolation AS aislamiento, @@GLOBAL.transaction_isolation AS aislamiento_global, @@SESSION.innodb_lock_wait_timeout AS espera';
+const INSERTAR_MATERIA = "INSERT INTO pansys_test.materia_prima (nombre, unidad_medida, cantidad_disponible, stock_minimo, precio_unitario, panaderia_id, estado, createdAt, updatedAt) VALUES (?, 'kg', 1, 0, 1, ?, 1, NOW(), NOW())";
+const INSERTAR_VENTA = "INSERT INTO pansys_test.ventas (fecha, total, empleado_id, panaderia_id, estado, createdAt, updatedAt) VALUES (CURDATE(), 1, ?, ?, 'completada', NOW(), NOW())";
+const INSERTAR_DETALLE = 'INSERT INTO pansys_test.detalle_ventas (venta_id, producto_id, cantidad, precio_unitario, subtotal, createdAt, updatedAt) VALUES (?, ?, 1, 1, 1, NOW(), NOW())';
 
 class ErrorVerificacion extends Error {
   constructor(mensaje) {
@@ -126,7 +132,7 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
     informe.comprobar('V0', 'DB_NAME es pansys_test', false);
     return 1;
   }
-  const { iniciarEjecucion, ErrorAislamiento, NOMBRE_BLOQUEO } = require('./aislamiento');
+  const { iniciarEjecucion, ErrorAislamiento, NOMBRE_BLOQUEO, SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS } = require('./aislamiento');
   const iniciarSuite = iniciar ?? ((opciones) => iniciarEjecucion(opciones));
 
   let ejecucion = null;
@@ -141,6 +147,9 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
   };
   let limpiezaCorrecta = false;
   let previstos = null;
+  // true en cuanto se intenta la primera escritura de datos (antes de enviarla: cubre también una
+  // escritura de resultado incierto). Si sigue en false, la verificación se detuvo sin crear datos.
+  let escrituraIntentada = false;
 
   try {
     // ---------- Bloqueo de suite (V1, V2, V8) ----------
@@ -172,11 +181,28 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
     informe.comprobar('V10', 'el alias de information_schema devuelve la columna "tabla"',
       tablas.length === 2 && tablas.every(f => typeof f.tabla === 'string'), JSON.stringify(Object.keys(tablas[0] ?? {})));
 
+    // ---------- V14: nivel de aislamiento y tiempo de espera de la sesión (solo lectura) ----------
+    // La conexión auxiliar se abre con la misma configuración que la dedicada de aislamiento.js y
+    // mysql2 no fija el nivel: ambas sesiones heredan el valor global, que también se lee
+    const [sesion] = await consultar(aux, LECTURA_SESION);
+    const aislamiento = sesion?.aislamiento ?? null;
+    informe.nota(`aislamiento de la sesión: ${aislamiento ?? '(desconocido)'}; global: ${sesion?.aislamiento_global ?? '(desconocido)'}; ` +
+      `innodb_lock_wait_timeout de la sesión: ${sesion?.espera ?? '(desconocido)'} s`);
+    const nivelAdmitido = NIVELES_ADMITIDOS.includes(aislamiento) && aislamiento === sesion?.aislamiento_global;
+    informe.comprobar('V14', `nivel de aislamiento admitido (${NIVELES_ADMITIDOS.join(' o ')}) e igual al global`, nivelAdmitido,
+      `sesión ${aislamiento ?? '(desconocido)'}, global ${sesion?.aislamiento_global ?? '(desconocido)'}`);
+    // Detención antes del primer INSERT: no hay nada que limpiar (limpiar() se ejecuta igualmente
+    // y, sin nada registrado, no envía ningún borrado)
+    if (!nivelAdmitido) throw new ErrorVerificacion('V14: nivel de aislamiento no admitido; no se crean datos de prueba');
+
     // ---------- Datos propios (solo con el bloqueo vigente) ----------
     await ejecucion.exigirBloqueo();
     // Antes del primer INSERT: si el proceso se interrumpe, el runId ya está a la vista
     informe.nota(`runId de esta ejecución: ${ejecucion.runId} (filas marcadas con "prueba.verificacion.${ejecucion.runId}." y "PRUEBA ${ejecucion.runId}")`);
-    const insertar = async (sql, params) => (await escribir(datos, 'datos', sql, params)).insertId;
+    const insertar = async (sql, params) => {
+      escrituraIntentada = true;
+      return (await escribir(datos, 'datos', sql, params)).insertId;
+    };
     const admin = ejecucion.registrar('usuarios', await insertar(
       "INSERT INTO pansys_test.usuarios (email, contrasena, rol_id, panaderia_id, estado, version_sesion, createdAt, updatedAt) VALUES (?, '!', 1, NULL, 0, 0, NOW(), NOW())",
       [ejecucion.correo('admin')]));
@@ -253,6 +279,67 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
     const [tras] = await consultar(aux, 'SELECT nombre FROM pansys_test.productos WHERE id = ?', [productoA]);
     informe.comprobar('V7', 'ROLLBACK deja la fila como estaba', tras?.nombre === nombreProducto);
 
+    // Desde aquí, cada fila creada se suma a "previstos" en cuanto existe: todas son propias (de A
+    // o de B) y la limpieza normal las borra con su panadería o con su venta.
+
+    // ---------- V11: detección de un detalle de otra panadería hacia un producto propio (R1) ----------
+    // Una venta PROPIA de B con un detalle hacia el producto de A. Con la consulta exacta de
+    // limpiar() y solo [A] como propias, B hace de panadería ajena: debe contarse 1; con [A, B],
+    // 0. Solo lectura: no se ejecuta ninguna limpieza con datos ajenos. La limpieza normal (A y B)
+    // borra este detalle en el paso de detalle_ventas, por su venta, antes que los productos.
+    const ventaB = await insertar(INSERTAR_VENTA, [admin, panB]);
+    previstos.ventas += 1;
+    await insertar(INSERTAR_DETALLE, [ventaB, productoA]);
+    previstos.detalle_ventas += 1;
+    const [soloA] = await consultar(aux, SQL_DETALLES_AJENOS, [[panA], [panA]]);
+    const [ambas] = await consultar(aux, SQL_DETALLES_AJENOS, [[panA, panB], [panA, panB]]);
+    informe.comprobar('V11', 'la consulta de limpiar() detecta el detalle de otra panadería hacia un producto propio (n = 1)',
+      Number(soloA?.n) === 1, `n = ${soloA?.n}`);
+    informe.comprobar('V11', 'con las dos panaderías como propias no hay detalles ajenos (n = 0)', Number(ambas?.n) === 0, `n = ${ambas?.n}`);
+
+    // ---------- V12: el bloqueo de productos de limpiar() frena un detalle que los referencia ----------
+    await consultar(aux, 'START TRANSACTION');
+    try {
+      await consultar(aux, SQL_BLOQUEO_PRODUCTOS, [[panA]]);
+      await consultar(datos, 'SET SESSION innodb_lock_wait_timeout = 2');
+      let errorEspera = null;
+      try {
+        await escribir(datos, 'datos', INSERTAR_DETALLE, [venta, productoA]);
+        previstos.detalle_ventas += 1; // la hipótesis falló: el detalle es propio (venta de A) y se limpia
+      } catch (error) {
+        errorEspera = error;
+      }
+      informe.comprobar('V12', 'el detalle hacia un producto bloqueado espera al FOR UPDATE y falla por tiempo (1205)',
+        errorEspera?.errno === 1205, codigoDe(errorEspera));
+    } finally {
+      await consultar(aux, 'ROLLBACK');
+    }
+
+    // ---------- V13: la instantánea la fija la primera lectura sin bloqueo, no el FOR UPDATE ----------
+    // Supuesto de la corrección de R1. La PRIMERA sentencia de la transacción de aux es el bloqueo de
+    // productos; después, datos confirma una materia prima propia en B (no bloqueada). El recuento sin
+    // bloqueo de aux debe verla: si el FOR UPDATE hubiera fijado la instantánea, daría 0. Una segunda
+    // materia prima confirmada después de ese recuento muestra el nivel real: con REPEATABLE-READ el
+    // recuento repetido sigue en 1; con READ-COMMITTED pasa a 2.
+    const contarMateriasB = async () => Number((await consultar(aux, 'SELECT COUNT(*) AS n FROM pansys_test.materia_prima WHERE panaderia_id = ?', [panB]))[0]?.n);
+    await consultar(aux, 'START TRANSACTION');
+    try {
+      await consultar(aux, SQL_BLOQUEO_PRODUCTOS, [[panA]]);
+      await insertar(INSERTAR_MATERIA, [ejecucion.nombre('Sal'), panB]);
+      previstos.materia_prima += 1;
+      const primero = await contarMateriasB();
+      await insertar(INSERTAR_MATERIA, [ejecucion.nombre('Azucar'), panB]);
+      previstos.materia_prima += 1;
+      const segundo = await contarMateriasB();
+      informe.comprobar('V13', 'tras el FOR UPDATE, la primera lectura sin bloqueo ve una fila confirmada después del bloqueo (n = 1)',
+        primero === 1, `n = ${primero}`);
+      const esperado = { 'REPEATABLE-READ': 1, 'READ-COMMITTED': 2 }[aislamiento];
+      informe.comprobar('V13', `la lectura repetida se comporta según el nivel ${aislamiento ?? '(desconocido)'}`,
+        esperado !== undefined && segundo === esperado, `n = ${segundo}, esperado ${esperado ?? 'ninguno (nivel no admitido)'}`);
+    } finally {
+      await consultar(aux, 'ROLLBACK');
+    }
+
     // ---------- V3: al destruir una conexión, MySQL suelta sus bloqueos (con un bloqueo aparte) ----------
     const v3 = await abrirConexion(crearConexion, env, 'v3');
     const eventos = [];
@@ -286,6 +373,12 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
     if (evaluacion.detener) {
       informe.comprobar('V5', 'limpieza de lo propio con limpiar()', false, limpieza?.resultado);
       evaluacion.lineas.forEach(l => salida(l));
+    } else if (!escrituraIntentada) {
+      // Detenida antes del primer INSERT (p. ej., por V14): no hay recuentos previstos que comparar,
+      // pero la limpieza debe haber terminado sin borrar nada
+      limpiezaCorrecta = true;
+      informe.comprobar('V5', 'sin datos creados (detención previa al primer INSERT): limpiar() no borra nada',
+        Object.keys(limpieza.borrados ?? {}).length === 0, JSON.stringify(limpieza.borrados));
     } else {
       limpiezaCorrecta = true;
       informe.comprobar('V5', 'limpiar() borra lo propio con los recuentos previstos',

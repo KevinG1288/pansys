@@ -14,7 +14,8 @@ const EventEmitter = require('events');
 const { spawnSync } = require('child_process');
 const {
   NOMBRE_BLOQUEO, ErrorAislamiento, verificarConfiguracion, iniciarEjecucion, Ejecucion, abrirBloqueo,
-  PLANTILLA_CUENTA, PLANTILLA_PANADERIA, PLANTILLA_PRODUCTO, limpiezaCorrecta, describirPendientes
+  PLANTILLA_CUENTA, PLANTILLA_PANADERIA, PLANTILLA_PRODUCTO, limpiezaCorrecta, describirPendientes,
+  SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS
 } = require('./aislamiento');
 
 const resultados = [];
@@ -315,6 +316,9 @@ const preparar = async ({ opcionales = false, propios = true } = {}) => {
 };
 
 const sentencias = (conexion, prefijo) => conexion.registro.filter(s => s.startsWith(prefijo));
+// Comprobación R1 de limpiar(): bloqueo de los productos propios y detalles de ventas ajenas
+// (constantes exportadas por el módulo; su texto se fija en una prueba propia)
+const esConsultaDetallesAjenos = (sql) => sql === SQL_DETALLES_AJENOS;
 const ESCRITURAS = /^(DELETE|INSERT|UPDATE|START TRANSACTION|TRUNCATE|DROP|ALTER)/;
 
 const main = async () => {
@@ -491,8 +495,21 @@ const main = async () => {
     igual('DATABASE() se comprueba dentro de la transacción y antes del primer DELETE', iTx < iBase && iBase < iPrimerDelete, true);
     igual('el bloqueo se comprueba antes de la transacción y otra vez justo antes del COMMIT',
       [conexion.registro.indexOf('SELECT IS_USED_LOCK(?) AS dueno') < iTx, iUltimoLock > iPrimerDelete && iUltimoLock === iCommit - 1], [true, true]);
+    // Cuentas, panaderías y (R1) todos los productos de las panaderías propias
     igual('las filas propias se bloquean (FOR UPDATE) antes de borrar',
-      conexion.registro.filter(s => s.endsWith('FOR UPDATE')).length, 2);
+      conexion.registro.filter(s => s.endsWith('FOR UPDATE')).length, 3);
+    const iLockProductos = conexion.registro.indexOf(SQL_BLOQUEO_PRODUCTOS);
+    const iDetalles = conexion.registro.findIndex(esConsultaDetallesAjenos);
+    igual('R1: productos bloqueados y detalles ajenos comprobados dentro de la transacción y antes del primer DELETE',
+      [iTx < iLockProductos, iLockProductos < iDetalles, iDetalles < iPrimerDelete], [true, true, true]);
+    // Con REPEATABLE READ la primera lectura sin bloqueo fija la instantánea: todos los FOR UPDATE
+    // (cuentas, panaderías y productos) deben ir antes del primer recuento de la transacción
+    const iPrimerRecuento = conexion.registro.findIndex((s, i) => i > iTx && s.startsWith('SELECT COUNT'));
+    const iUltimoForUpdate = conexion.registro.reduce((ultimo, s, i) => (i > iTx && s.endsWith('FOR UPDATE') ? i : ultimo), -1);
+    igual('R1: todos los FOR UPDATE (también el de productos) van antes del primer recuento sin bloqueo',
+      [iPrimerRecuento > iTx, iUltimoForUpdate === iLockProductos, iLockProductos < iPrimerRecuento], [true, true, true]);
+    igual('R1: el detalle de una venta propia hacia un producto propio no bloquea la limpieza',
+      [limpieza.ok, limpieza.borrados.detalle_ventas, servidor.db.detalle_ventas.some(f => f.id === 90)], [true, 1, false]);
     const repetida = await ej.limpiar();
     igual('segunda limpieza -> rechazada sin consultas nuevas', [repetida.ok, /ya está hecha/.test(repetida.motivo)], [false, true]);
     await ej.cerrar();
@@ -519,6 +536,8 @@ const main = async () => {
     const limpieza = await ej.limpiar();
     igual('solo cuentas registradas -> borra la cuenta sin tocar tablas de panadería',
       [limpieza.ok, servidor.db.usuarios.some(f => f.id === 15), sentencias(conexion, 'DELETE').length], [true, false, 2]);
+    igual('R1: sin panaderías no se bloquean productos ni se consultan detalles (sin IN () vacíos)',
+      [conexion.registro.includes(SQL_BLOQUEO_PRODUCTOS), conexion.registro.some(esConsultaDetallesAjenos)], [false, false]);
     await ej.cerrar();
   }
 
@@ -533,7 +552,7 @@ const main = async () => {
     igual(`${descripcion} -> datos idénticos a antes de limpiar`, JSON.stringify(servidor.db) === JSON.stringify(antes), true);
     igual(`${descripcion} -> sin COMMIT y con la ejecución abortada`, [conexion.registro.includes('COMMIT'), ej.estado], [false, 'abortada']);
     await ej.cerrar();
-    return { conexion, limpieza };
+    return { servidor, conexion, limpieza };
   };
 
   {
@@ -581,6 +600,73 @@ const main = async () => {
     const { conexion } = await abortada('la conexión dedicada apunta a otra base al limpiar',
       (s) => { s.antes = (sql) => { if (sql === 'START TRANSACTION') s.base = 'pansys_db'; }; }, /pansys_db/);
     igual('base distinta al limpiar: ningún DELETE ejecutado', sentencias(conexion, 'DELETE').length, 0);
+  }
+
+  // ---------- R1: detalles de ventas ajenas que referencian productos propios ----------
+  // detalle_ventas.producto_id es ON DELETE CASCADE: sin la comprobación, borrar el producto propio
+  // borraría en silencio el detalle ajeno. abortada() ya exige datos idénticos, sin COMMIT y abortada.
+  console.log('\n== R1: detalles de ventas ajenas');
+  igual('R1: texto exacto de las sentencias exportadas (las usa también aislamiento.mysql.js)', [SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS], [
+    'SELECT id FROM pansys_test.productos WHERE panaderia_id IN (?) FOR UPDATE',
+    'SELECT COUNT(*) AS n FROM pansys_test.detalle_ventas WHERE producto_id IN (SELECT id FROM pansys_test.productos WHERE panaderia_id IN (?)) AND venta_id NOT IN (SELECT id FROM pansys_test.ventas WHERE panaderia_id IN (?))'
+  ]);
+  igual('R1: las sentencias exportadas solo leen y solo usan tablas pansys_test.<tabla>',
+    [SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS].every(s => /^SELECT /.test(s) && !/\b(INSERT|UPDATE|DELETE|REPLACE)\b/.test(s.replace(/ FOR UPDATE$/, ''))
+      && [...s.matchAll(/\bFROM\s+([\w.]+)/g)].every(m => m[1].startsWith('pansys_test.'))), true);
+  const conDetalleAjeno = (productoId) => (s) => {
+    s.db.ventas.push({ id: 2, panaderia_id: 1 });
+    s.db.detalle_ventas.push({ id: 2, venta_id: 2, producto_id: productoId });
+  };
+  {
+    const { conexion, limpieza } = await abortada('U1 detalle de una venta ajena hacia un producto propio (creado por la API)',
+      conDetalleAjeno(40), /detalles de ventas ajenas que referencian productos propios/);
+    igual('U2 detalle ajeno: ningún DELETE, ROLLBACK y resultado revertida',
+      [sentencias(conexion, 'DELETE').length, conexion.registro.includes('ROLLBACK'), limpieza.resultado], [0, true, 'revertida']);
+    igual('U2 detalle ajeno: el resultado nunca cuenta como limpieza correcta',
+      [limpiezaCorrecta(limpieza), describirPendientes(limpieza)[0].startsWith('Limpieza NO correcta')], [false, true]);
+    igual('U2 detalle ajeno: los registros propios quedan pendientes de revisión',
+      [limpieza.pendientes?.usuarios, limpieza.pendientes?.panaderias], [[10, 11, 12], [20, 21]]);
+    const iTx = conexion.registro.indexOf('START TRANSACTION');
+    const iLock = conexion.registro.indexOf(SQL_BLOQUEO_PRODUCTOS);
+    const iDetalles = conexion.registro.findIndex(esConsultaDetallesAjenos);
+    igual('U5 orden: START TRANSACTION, bloqueo de productos y consulta de detalles, sin DELETE',
+      [iTx >= 0 && iTx < iLock, iLock < iDetalles, conexion.registro.some(s => s.startsWith('DELETE'))], [true, true, false]);
+    const iPrimerRecuento = conexion.registro.findIndex((s, i) => i > iTx && s.startsWith('SELECT COUNT'));
+    igual('U5 orden: el bloqueo de productos precede al primer recuento sin bloqueo (instantánea posterior al bloqueo)',
+      iLock < iPrimerRecuento, true);
+  }
+  {
+    const { servidor } = await abortada('U3 detalle ajeno hacia un producto de la otra panadería propia',
+      conDetalleAjeno(41), /detalles de ventas ajenas/);
+    igual('U3 la fila ajena sigue existiendo', servidor.db.detalle_ventas.some(f => f.id === 2 && f.producto_id === 41), true);
+  }
+  {
+    const { conexion, limpieza } = await abortada('U10 error de MySQL al consultar los detalles',
+      (s) => { s.antes = (sql) => { if (esConsultaDetallesAjenos(sql)) { s.antes = null; throw errorMysql('ETIMEDOUT', 'timeout'); } }; }, /ROLLBACK/);
+    igual('U10 error en la comprobación: revertida, sin DELETE y no correcta',
+      [limpieza.resultado, sentencias(conexion, 'DELETE').length, limpiezaCorrecta(limpieza)], ['revertida', 0, false]);
+  }
+  {
+    const { conexion, limpieza } = await abortada('U11 conexión perdida al consultar los detalles',
+      (s) => { s.antes = (sql, c) => { if (esConsultaDetallesAjenos(sql)) { s.antes = null; c.perder(); } }; }, /ROLLBACK/);
+    igual('U11 conexión perdida en la comprobación: revertida, sin DELETE y no correcta',
+      [limpieza.resultado, sentencias(conexion, 'DELETE').length, limpiezaCorrecta(limpieza)], ['revertida', 0, false]);
+  }
+  {
+    const { conexion, limpieza } = await abortada('U12 error al bloquear los productos propios',
+      (s) => { s.antes = (sql) => { if (sql === SQL_BLOQUEO_PRODUCTOS) { s.antes = null; throw errorMysql('ER_LOCK_WAIT_TIMEOUT', 'lock wait'); } }; }, /ROLLBACK/);
+    igual('U12 error en el bloqueo: revertida, sin consultar detalles, sin DELETE y no correcta',
+      [limpieza.resultado, conexion.registro.some(esConsultaDetallesAjenos), sentencias(conexion, 'DELETE').length, limpiezaCorrecta(limpieza)],
+      ['revertida', false, 0, false]);
+    igual('U12 error en el bloqueo: ningún recuento enviado y ROLLBACK ejecutado',
+      [sentencias(conexion, 'SELECT COUNT').length, conexion.registro.includes('ROLLBACK')], [0, true]);
+  }
+  {
+    const { conexion, limpieza } = await abortada('U13 conexión perdida al bloquear los productos propios',
+      (s) => { s.antes = (sql, c) => { if (sql === SQL_BLOQUEO_PRODUCTOS) { s.antes = null; c.perder(); } }; }, /ROLLBACK/);
+    igual('U13 conexión perdida en el bloqueo: revertida, sin recuentos, sin DELETE y no correcta',
+      [limpieza.resultado, sentencias(conexion, 'SELECT COUNT').length, sentencias(conexion, 'DELETE').length, limpiezaCorrecta(limpieza)],
+      ['revertida', 0, 0, false]);
   }
 
   // ---------- Barrera explícita: una ejecución abortada no limpia ----------
@@ -1061,6 +1147,21 @@ const main = async () => {
     igual('limpiar() borra los productos con su panadería y lo ajeno queda idéntico',
       [limpieza.ok, limpieza.resultado, limpieza.borrados.productos, JSON.stringify(servidor.db) === JSON.stringify(ajenos)], [true, 'limpia', 2, true]);
     igual('describirPendientes de una limpieza correcta no lista productos', describirPendientes(limpieza), ['Limpieza correcta: no queda ninguna fila pendiente.']);
+    await ej.cerrar();
+  }
+  {
+    // U4 (R1): detalle de una venta ajena hacia un producto creado con crearProducto
+    const { servidor, ej, conexion, pan } = await conPanaderia();
+    const producto = await ej.crearProducto({ etiqueta: 'Pan', panaderiaId: pan, precio: 500, cantidad: 10, activo: true });
+    servidor.db.ventas.push({ id: 2, panaderia_id: 1 });
+    servidor.db.detalle_ventas.push({ id: 2, venta_id: 2, producto_id: producto });
+    const antes = copiar(servidor.db);
+    const limpieza = await ej.limpiar();
+    igual('U4 detalle ajeno hacia un producto de crearProducto -> revertida, sin DELETE y datos idénticos',
+      [limpieza.resultado, /detalles de ventas ajenas/.test(limpieza.motivo ?? ''), sentencias(conexion, 'DELETE').length,
+        JSON.stringify(servidor.db) === JSON.stringify(antes), limpiezaCorrecta(limpieza)],
+      ['revertida', true, 0, true, false]);
+    igual('U4 el producto queda pendiente de revisión', limpieza.pendientes?.productos, [producto]);
     await ej.cerrar();
   }
 

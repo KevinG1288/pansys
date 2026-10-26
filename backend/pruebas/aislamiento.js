@@ -8,8 +8,10 @@
 //    que crea (marcadas con su runId). La limpieza borra solo esas filas y las que dependen de
 //    ellas por clave foránea; nunca rangos de id, patrones de nombre ni tablas completas.
 // 3. Limpieza transaccional en la conexión dedicada: comprobaciones previas (base, bloqueo,
-//    marcas y dependencias ajenas), borrado en orden de claves foráneas con recuento previo y
-//    verificación de filas afectadas, y nueva comprobación del bloqueo antes del COMMIT.
+//    marcas y dependencias ajenas, incluidos los detalles de ventas ajenas que referencien
+//    productos propios y que el ON DELETE CASCADE borraría), borrado en orden de claves foráneas
+//    con recuento previo y verificación de filas afectadas, y nueva comprobación del bloqueo
+//    antes del COMMIT.
 //    Ante cualquier duda: ROLLBACK, y los registros temporales quedan para revisión posterior.
 //
 // El bloqueo no excluye a otros procesos que escriban en pansys_test (demo, npm run dev,
@@ -31,6 +33,11 @@ const PLANTILLA_CUENTA = "INSERT INTO pansys_test.usuarios (email, contrasena, r
 const PLANTILLA_PANADERIA = "INSERT INTO pansys_test.panaderias (nombre, direccion, telefono, en_red, usuario_id, createdAt, updatedAt) VALUES (?, 'Dirección temporal de pruebas', NULL, 0, ?, NOW(), NOW())";
 // Producto temporal, solo en una panadería propia (precio_compra fijo en 0)
 const PLANTILLA_PRODUCTO = 'INSERT INTO pansys_test.productos (nombre, precio_compra, precio_venta, cantidad_disponible, panaderia_id, estado, createdAt, updatedAt) VALUES (?, 0, ?, ?, ?, ?, NOW(), NOW())';
+// Comprobación R1 de la limpieza (ver comprobarAntesDeBorrar). Se exportan para que la verificación
+// contra MySQL real (aislamiento.mysql.js) use exactamente el mismo texto. Parámetros:
+// bloqueo [panaderías propias]; detalles [panaderías propias, panaderías propias].
+const SQL_BLOQUEO_PRODUCTOS = 'SELECT id FROM pansys_test.productos WHERE panaderia_id IN (?) FOR UPDATE';
+const SQL_DETALLES_AJENOS = 'SELECT COUNT(*) AS n FROM pansys_test.detalle_ventas WHERE producto_id IN (SELECT id FROM pansys_test.productos WHERE panaderia_id IN (?)) AND venta_id NOT IN (SELECT id FROM pansys_test.ventas WHERE panaderia_id IN (?))';
 const PRECIO_MAXIMO = 1e9; // productos.precio_venta es FLOAT
 const CANTIDAD_MAXIMA = 1000000; // productos.cantidad_disponible es INT
 // Roles de la semilla (backend/src/config/roles.js); se comprueban en la base antes de la primera cuenta
@@ -580,8 +587,18 @@ class Ejecucion {
       const fuera = filas.find(f => !panaderias.includes(f.panaderia_id) || typeof f.nombre !== 'string' || !f.nombre.startsWith(`PRUEBA ${this.runId} `));
       if (fuera) throw new ErrorAislamiento(`El producto ${fuera.id} no está en una panadería propia o no tiene la marca de esta ejecución`);
     }
+    // Se bloquean TODOS los productos de las panaderías propias (también los creados por la API),
+    // para que nadie añada detalles de ventas que los referencien durante la limpieza (ver la
+    // comprobación de detalles ajenos más abajo). Debe ir ANTES del primer recuento: con REPEATABLE
+    // READ, la primera lectura sin bloqueo fija la instantánea de la transacción; si se fijara antes
+    // del bloqueo, un detalle confirmado entre ambos no se vería en el recuento y el DELETE (que lee
+    // los datos actuales) lo borraría en cascada.
+    if (panaderias.length) {
+      await this.#bloqueo.consultar(SQL_BLOQUEO_PRODUCTOS, [panaderias]);
+    }
 
-    // Dependencias ajenas que la limpieza arrastraría o que la harían fallar a medias
+    // Dependencias ajenas que la limpieza arrastraría o que la harían fallar a medias. Son lecturas
+    // sin bloqueo: la instantánea se fija aquí, con todas las filas propias ya bloqueadas.
     const contar = async (sql, params) => Number((await this.#bloqueo.consultar(sql, params))[0].n);
     if (usuarios.length) {
       // Borrar una cuenta propietaria borra sus panaderías (ON DELETE CASCADE)
@@ -604,6 +621,14 @@ class Ejecucion {
         : `SELECT COUNT(*) AS n FROM ${tabla('usuarios')} WHERE panaderia_id IN (?)`;
       if (await contar(sql, usuarios.length ? [panaderias, usuarios] : [panaderias])) {
         throw new ErrorAislamiento('Hay cuentas ajenas asignadas a una panadería propia');
+      }
+      // detalle_ventas.producto_id es ON DELETE CASCADE: borrar un producto propio borraría en
+      // silencio los detalles de ventas ajenas que lo referencien (affectedRows no cuenta la
+      // cascada). Con los productos ya bloqueados, se exige que no haya ninguna referencia ajena.
+      // venta_id es NOT NULL, así que NOT IN es seguro.
+      const detallesAjenos = await contar(SQL_DETALLES_AJENOS, [panaderias, panaderias]);
+      if (detallesAjenos) {
+        throw new ErrorAislamiento(`Hay ${detallesAjenos} detalles de ventas ajenas que referencian productos propios: el borrado en cascada los eliminaría`);
       }
     }
 
@@ -741,6 +766,8 @@ module.exports = {
   PLANTILLA_CUENTA,
   PLANTILLA_PANADERIA,
   PLANTILLA_PRODUCTO,
+  SQL_BLOQUEO_PRODUCTOS,
+  SQL_DETALLES_AJENOS,
   ErrorAislamiento,
   verificarConfiguracion,
   abrirBloqueo,

@@ -40,7 +40,7 @@ function ejecutarPruebas() {
   const { spawnSync } = require('child_process');
   const foto = require('./foto_pansys_test');
   const herramienta = require('./aislamiento.mysql');
-  const { ErrorAislamiento } = require('./aislamiento');
+  const { ErrorAislamiento, SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS } = require('./aislamiento');
 
   const RAIZ = path.resolve(__dirname, '..', '..');
   const resultados = [];
@@ -424,12 +424,24 @@ function ejecutarPruebas() {
 
     console.log('\n== aislamiento.mysql.js: flujo completo con dobles');
     // Doble de MySQL para el script y ejecución doble del módulo de aislamiento
+    // V11 añade una venta y un detalle; V13, dos materias primas (todo propio)
     const PREVISTOS = {
-      insumo_usado: 1, orden_produccion: 1, receta_producto: 1, detalle_ventas: 1, ventas: 1, productos: 2,
-      materia_prima: 1, 'usuarios (empleados)': 1, panaderias: 2, 'usuarios (propietarias)': 1
+      insumo_usado: 1, orden_produccion: 1, receta_producto: 1, detalle_ventas: 2, ventas: 2, productos: 2,
+      materia_prima: 3, 'usuarios (empleados)': 1, panaderias: 2, 'usuarios (propietarias)': 1
     };
-    const crearEscenario = ({ v6Bloquea = true, fallarInsertEn = null, bases = [], resultado = 'limpia', borrados = PREVISTOS, segundaObtiene = false, iniciarFalla = false } = {}) => {
-      const estado = { conexiones: [], eventos: [], todas: [], ids: 500, productos: {}, bloqueoPanaderia: false, v3Dueno: null, limpio: false };
+    const CONTAR_MATERIAS = 'SELECT COUNT(*) AS n FROM pansys_test.materia_prima WHERE panaderia_id = ?';
+    // Opciones de V11-V14: v11Detecta (la consulta de detalles ajenos cuenta el detalle cruzado),
+    // v12Bloquea (el FOR UPDATE de productos frena el INSERT del detalle), v13VeFila (la instantánea
+    // NO la fija el FOR UPDATE), aislamiento y aislamientoGlobal (valores que devuelve V14)
+    const crearEscenario = ({ v6Bloquea = true, fallarInsertEn = null, bases = [], resultado = 'limpia', borrados = PREVISTOS, segundaObtiene = false, iniciarFalla = false,
+      v11Detecta = true, v12Bloquea = true, v13VeFila = true, aislamiento = 'REPEATABLE-READ', aislamientoGlobal = aislamiento,
+      borradosSinDatos = {} } = {}) => {
+      const estado = {
+        conexiones: [], eventos: [], todas: [], ids: 500, productos: {}, bloqueoPanaderia: false, v3Dueno: null, limpio: false,
+        panaderias: [], materias: {}, bloqueoProductos: false
+      };
+      // Instantánea de una transacción (REPEATABLE-READ): recuento de materias primas por panadería
+      const fijarVista = (c) => { if (!c.vista) c.vista = { ...estado.materias }; };
       const crearConexion = async () => {
         const c = new EventEmitter();
         c.id = 900 + estado.conexiones.length;
@@ -452,16 +464,45 @@ function ejecutarPruebas() {
             if (m[1] === 'productos' && estado.bloqueoPanaderia && c.esperaCorta && v6Bloquea) {
               throw Object.assign(new Error('Lock wait timeout exceeded'), { code: 'ER_LOCK_WAIT_TIMEOUT', errno: 1205 });
             }
+            if (m[1] === 'detalle_ventas' && estado.bloqueoProductos && c.esperaCorta && v12Bloquea) {
+              throw Object.assign(new Error('Lock wait timeout exceeded'), { code: 'ER_LOCK_WAIT_TIMEOUT', errno: 1205 });
+            }
             const id = ++estado.ids;
             if (m[1] === 'productos') estado.productos[id] = params[0];
+            if (m[1] === 'panaderias') estado.panaderias.push(id);
+            if (m[1] === 'materia_prima') estado.materias[params[1]] = (estado.materias[params[1]] ?? 0) + 1;
             return [{ insertId: id, affectedRows: 1 }];
+          }
+          if (sql.startsWith('SELECT @@SESSION.transaction_isolation')) {
+            return [[{ aislamiento, aislamiento_global: aislamientoGlobal, espera: 50 }]];
+          }
+          if (sql === SQL_DETALLES_AJENOS) {
+            // El único detalle cruzado es el de V11: venta de B hacia un producto de A
+            const [panA, panB] = estado.panaderias;
+            const propias = params[0];
+            return [[{ n: v11Detecta && propias.includes(panA) && !propias.includes(panB) ? 1 : 0 }]];
+          }
+          if (sql === SQL_BLOQUEO_PRODUCTOS) {
+            estado.bloqueoProductos = true;
+            c.forUpdateProductos = true;
+            if (!v13VeFila && c.tx) fijarVista(c); // hipótesis falsa: el FOR UPDATE fija la instantánea
+            return [[]];
+          }
+          if (sql === CONTAR_MATERIAS) {
+            if (c.tx && aislamiento !== 'READ-COMMITTED') {
+              fijarVista(c);
+              return [[{ n: c.vista[params[0]] ?? 0 }]];
+            }
+            return [[{ n: estado.materias[params[0]] ?? 0 }]];
           }
           if ((m = sql.match(/^SELECT COUNT\(\*\) AS n FROM pansys_test\.(usuarios|panaderias) WHERE id IN \(\?\)$/))) return [[{ n: estado.limpio ? 0 : params[0].length }]];
           if (sql === 'SELECT COUNT(*) AS n FROM pansys_test.productos WHERE panaderia_id IN (?)') return [[{ n: estado.limpio ? 0 : 2 }]];
-          if (sql === 'START TRANSACTION') { c.tx = true; return [{}]; }
+          if (sql === 'START TRANSACTION') { c.tx = true; c.vista = null; return [{}]; }
           if (sql === 'ROLLBACK') {
             c.tx = false;
+            c.vista = null;
             if (c.forUpdate) { estado.bloqueoPanaderia = false; c.forUpdate = false; }
+            if (c.forUpdateProductos) { estado.bloqueoProductos = false; c.forUpdateProductos = false; }
             if (c.pendiente) { estado.productos[c.pendiente.id] = c.pendiente.anterior; c.pendiente = null; }
             return [{}];
           }
@@ -492,8 +533,10 @@ function ejecutarPruebas() {
         ejecucion.llamadas.limpiar++;
         estado.eventos.push('limpiar');
         estado.limpio = resultado === 'limpia';
+        // Como el módulo real: sin nada registrado no se borra nada (borradosSinDatos simula lo contrario)
+        const hayPropios = ejecucion.propios.usuarios.length + ejecucion.propios.panaderias.length > 0;
         return resultado === 'limpia'
-          ? { ok: true, resultado, motivo: null, borrados, pendientes: null }
+          ? { ok: true, resultado, motivo: null, borrados: hayPropios ? borrados : borradosSinDatos, pendientes: null }
           : { ok: false, resultado, motivo: 'simulado', borrados: {}, pendientes: { runId: ejecucion.runId, usuarios: ejecucion.ids('usuarios'), panaderias: ejecucion.ids('panaderias') } };
       };
       ejecucion.cerrar = async () => { ejecucion.llamadas.cerrar++; estado.eventos.push('cerrar'); };
@@ -514,8 +557,20 @@ function ejecutarPruebas() {
       const e = crearEscenario();
       const codigo = await e.correr();
       igual('flujo correcto -> código 0 y todas las comprobaciones OK', [codigo, e.salida.filter(l => l.startsWith('FALLA'))], [0, []]);
-      igual('se informan V1, V2, V3, V4, V5, V6, V7, V8 y V10',
-        [...new Set(lineasOk(e.salida))].filter(c => c !== '--').sort(), ['V1', 'V10', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8']);
+      igual('se informan V1-V8 y V10-V14',
+        [...new Set(lineasOk(e.salida))].filter(c => c !== '--').sort(), ['V1', 'V10', 'V11', 'V12', 'V13', 'V14', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8']);
+      igual('V11-V13 usan las sentencias exactas de aislamiento.js (detalles ajenos 2 veces, bloqueo de productos 2 veces)',
+        [e.estado.todas.filter(s => s === SQL_DETALLES_AJENOS).length, e.estado.todas.filter(s => s === SQL_BLOQUEO_PRODUCTOS).length], [2, 2]);
+      const aux = e.estado.conexiones[1];
+      igual('las transacciones de la conexión auxiliar terminan todas con ROLLBACK y ninguna con COMMIT',
+        [aux.registro.filter(s => s === 'START TRANSACTION').length === aux.registro.filter(s => s === 'ROLLBACK').length, e.estado.todas.includes('COMMIT')], [true, false]);
+      const inicios = aux.registro.map((s, i) => [s, i]).filter(([s]) => s === 'START TRANSACTION').map(([, i]) => i);
+      igual('V12 y V13: la primera sentencia de su transacción es el bloqueo de productos (V13 depende de ello)',
+        inicios.slice(-2).map(i => aux.registro[i + 1]), [SQL_BLOQUEO_PRODUCTOS, SQL_BLOQUEO_PRODUCTOS]);
+      igual('el nivel de aislamiento se informa en la salida',
+        e.salida.some(l => l.includes('aislamiento de la sesión: REPEATABLE-READ; global: REPEATABLE-READ; innodb_lock_wait_timeout de la sesión: 50 s')), true);
+      igual('V11-V13 solo escriben en la conexión de datos (la auxiliar no hace INSERT ni UPDATE)',
+        aux.registro.some(s => /^(INSERT|UPDATE) /.test(s)), false);
       igual('limpiar() y cerrar() se llaman exactamente una vez', [e.ejecucion.llamadas.limpiar, e.ejecucion.llamadas.cerrar], [1, 1]);
       igual('el script no envía ningún DELETE', e.estado.todas.some(s => /\bDELETE\b/i.test(s)), false);
       const datos = e.estado.conexiones[0];
@@ -551,10 +606,85 @@ function ejecutarPruebas() {
         [codigo, e.salida.some(l => l.startsWith('FALLA V6')), e.salida.some(l => l.startsWith('OK    V5 limpiar() borra'))], [1, true, true]);
     }
     {
+      const e = crearEscenario({ aislamiento: 'READ-COMMITTED' });
+      const codigo = await e.correr();
+      igual('READ-COMMITTED -> admitido: código 0 y V13 espera que la lectura repetida vea la segunda fila',
+        [codigo, e.salida.filter(l => l.startsWith('FALLA'))], [0, []]);
+    }
+    // Nivel no admitido: V14 detiene la verificación antes del primer INSERT
+    const detenidaEnV14 = (e) => [
+      e.estado.todas.some(s => /^(INSERT|UPDATE) /.test(s)),
+      e.salida.some(l => /^(OK|FALLA) +V1[123] /.test(l)),
+      e.estado.todas.some(s => s === SQL_DETALLES_AJENOS || s === SQL_BLOQUEO_PRODUCTOS),
+      e.ejecucion.propios,
+      e.salida.some(l => l.startsWith('FALLA --') && l.includes('V14: nivel de aislamiento no admitido')),
+      e.ejecucion.llamadas.limpiar,
+      todasCerradas(e.estado)
+    ];
+    const DETENIDA = [false, false, false, { usuarios: [], panaderias: [] }, true, 1, true];
+    {
+      const e = crearEscenario({ aislamiento: 'SERIALIZABLE' });
+      const codigo = await e.correr();
+      igual('nivel no admitido (SERIALIZABLE) -> FALLA V14 con el valor a la vista y código 1',
+        [codigo, e.salida.some(l => l.startsWith('FALLA V14') && l.includes('SERIALIZABLE')), e.salida.some(l => l.includes('aislamiento de la sesión: SERIALIZABLE'))],
+        [1, true, true]);
+      igual('SERIALIZABLE: se detiene antes de crear datos (sin INSERT/UPDATE, sin V11-V13, nada registrado, una limpieza vacía, conexiones cerradas)',
+        detenidaEnV14(e), DETENIDA);
+    }
+    {
+      const e = crearEscenario({ aislamientoGlobal: 'READ-UNCOMMITTED' });
+      const codigo = await e.correr();
+      igual('nivel de la sesión distinto del global -> FALLA V14 y código 1',
+        [codigo, e.salida.some(l => l.startsWith('FALLA V14') && l.includes('global READ-UNCOMMITTED'))], [1, true]);
+      igual('sesión distinta del global: se detiene antes de crear datos (mismas garantías)', detenidaEnV14(e), DETENIDA);
+    }
+    const fallas = (e) => e.salida.filter(l => l.startsWith('FALLA')).map(l => l.split(' ').filter(Boolean)[1]);
+    for (const opciones of [{ aislamiento: 'SERIALIZABLE' }, { aislamientoGlobal: 'READ-UNCOMMITTED' }]) {
+      const e = crearEscenario(opciones);
+      const codigo = await e.correr();
+      igual(`detención en V14 (${JSON.stringify(opciones)}): solo FALLA V14 y la interrupción, sin FALLA secundaria de V5, código 1`,
+        [codigo, fallas(e), e.salida.some(l => l.startsWith('OK    V5 sin datos creados'))], [1, ['V14', '--'], true]);
+      igual(`detención en V14 (${JSON.stringify(opciones)}): ningún INSERT, UPDATE ni DELETE y una sola limpieza`,
+        [e.estado.todas.some(s => /^(INSERT|UPDATE|DELETE)\b/.test(s)), e.ejecucion.llamadas.limpiar], [false, 1]);
+    }
+    {
+      const e = crearEscenario({ aislamiento: 'SERIALIZABLE', resultado: 'revertida' });
+      const codigo = await e.correr();
+      igual('detención en V14 con una limpieza que no termina en "limpia" -> FALLA V5 igualmente (no se oculta)',
+        [codigo, fallas(e).includes('V5'), e.ejecucion.llamadas.limpiar], [1, true, 1]);
+    }
+    {
+      const e = crearEscenario({ aislamiento: 'SERIALIZABLE', borradosSinDatos: { 'usuarios (propietarias)': 1 } });
+      const codigo = await e.correr();
+      igual('detención en V14 con una limpieza que borra algo sin datos creados -> FALLA V5 (no se oculta)',
+        [codigo, fallas(e).includes('V5')], [1, true]);
+    }
+    {
+      const e = crearEscenario({ v11Detecta: false });
+      const codigo = await e.correr();
+      igual('si la consulta no detectara el detalle cruzado -> FALLA V11, código 1 y limpieza normal única',
+        [codigo, e.salida.some(l => l.startsWith('FALLA V11')), e.ejecucion.llamadas.limpiar], [1, true, 1]);
+    }
+    {
+      const e = crearEscenario({ v12Bloquea: false, borrados: { ...PREVISTOS, detalle_ventas: 3 } });
+      const codigo = await e.correr();
+      igual('si la hipótesis V12 resulta falsa -> FALLA V12, código 1, y el detalle extra (propio) se cuenta en la limpieza',
+        [codigo, e.salida.some(l => l.startsWith('FALLA V12')), e.salida.some(l => l.startsWith('OK    V5 limpiar() borra'))], [1, true, true]);
+    }
+    {
+      const e = crearEscenario({ v13VeFila: false });
+      const codigo = await e.correr();
+      igual('si el FOR UPDATE fijara la instantánea -> FALLA V13 (n = 0) y código 1',
+        [codigo, e.salida.some(l => l.startsWith('FALLA V13 tras el FOR UPDATE') && l.includes('n = 0'))], [1, true]);
+    }
+    {
       const e = crearEscenario({ fallarInsertEn: 'materia_prima' });
       const codigo = await e.correr();
       igual('fallo a mitad de la creación de datos -> código 1, limpiar una sola vez y conexiones cerradas antes',
         [codigo, e.ejecucion.llamadas.limpiar, e.estado.eventos.indexOf('limpiar') > e.estado.eventos.indexOf('fin:900'), todasCerradas(e.estado)], [1, 1, true, true]);
+      igual('fallo a mitad de la creación de datos (con datos ya creados) -> V5 sigue comparando recuentos y da FALLA',
+        [e.salida.some(l => l.startsWith('FALLA V5 limpiar() borra lo propio con los recuentos previstos')), e.salida.some(l => l.startsWith('OK    V5 sin datos creados'))],
+        [true, false]);
     }
     {
       const e = crearEscenario({ iniciarFalla: true });
