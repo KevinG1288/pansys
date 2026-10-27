@@ -1400,10 +1400,9 @@ const main = async () => {
     await ej.cerrar();
   }
 
-  // ---------- Guardián de P1 en producción y cuentas ----------
-  console.log('\n== Suites de producción y cuentas deshabilitadas');
+  // ---------- Suites de integración adaptadas: arnés de proceso aislado ----------
   // Cada suite se ejecuta en un proceso hijo donde toda carga de módulos y toda conexión de red
-  // quedan bloqueadas y registradas: aunque el guardián faltara, no podría conectar con nada.
+  // quedan bloqueadas y registradas: aunque una barrera faltara, no podría conectar con nada.
   const ARNES = `
     const fs = require('fs');
     const path = require('path');
@@ -1435,51 +1434,170 @@ const main = async () => {
       ...envExtra
     }
   });
-  // Ventas ya está adaptada al aislamiento (ver más abajo); Producción y Cuentas siguen deshabilitadas
-  for (const [nombre, archivo] of [['Producción', 'produccion.pruebas.js'], ['Cuentas', 'usuarios.pruebas.js']]) {
-    const ruta = path.join(__dirname, archivo);
-    const r = ejecutarSuite(ruta);
-    igual(`${archivo}: termina con código 1 y el aviso de suite deshabilitada`,
-      [r.status, r.stderr.includes(`Suite de ${nombre} DESHABILITADA temporalmente por seguridad`)], [1, true]);
-    igual(`${archivo}: no intenta cargar ningún módulo (ni dotenv, ni modelos, ni servidor)`, (r.stderr.match(/<<REQUIRE:[^>]*>>/g) ?? []), []);
-    igual(`${archivo}: no intenta ninguna conexión de red`, /<<RED:/.test(r.stderr), false);
-    igual(`${archivo}: no escribe nada en la salida estándar (ninguna prueba llegó a ejecutarse)`, r.stdout, '');
-    // Control: el arnés detecta de verdad una suite sin guardián
-    const control = ejecutarSuite(ruta, true);
-    igual(`${archivo} sin guardián (control): el arnés detecta y bloquea la carga de dotenv`,
-      [/<<REQUIRE:dotenv>>/.test(control.stderr), /<<RED:/.test(control.stderr), control.status !== 0], [true, false, true]);
-
-    // Revisión estática: la salida es la segunda instrucción, en el nivel superior del archivo
-    const lineas = fs.readFileSync(ruta, 'utf8').split(/\r?\n/);
-    const codigo = lineas.map((l, i) => ({ l, n: i + 1 })).filter(x => x.l.trim() && !x.l.trim().startsWith('//'));
-    // El aviso ocupa dos líneas (texto partido); la tercera línea de código es la salida
-    igual(`${archivo}: las dos primeras instrucciones son el aviso y process.exit(1) sin sangría`,
-      [codigo[0].l.startsWith('console.error('), codigo[1].l.startsWith("  '"), codigo[2].l], [true, true, 'process.exit(1);']);
-    const nSalida = lineas.indexOf('process.exit(1);') + 1;
-    const primera = (re) => lineas.findIndex(l => re.test(l)) + 1;
-    igual(`${archivo}: require, process.env y sequelize aparecen solo después de la salida`,
-      [nSalida > 0, primera(/require\(/) > nSalida, primera(/process\.env\./) > nSalida, primera(/sequelize/) > nSalida], [true, true, true, true]);
-    igual(`${archivo}: no queda ningún DELETE FROM ni TRUNCATE`, lineas.some(l => /DELETE FROM|TRUNCATE/i.test(l)), false);
+  // Sustituciones "Objeto.metodo = ..." (Objeto en `objetos`) que NO son hijas directas de un
+  // `try {` cuyo `} finally {` restaura "Objeto.metodo = <algo>Original;". Devuelve las líneas
+  // problemáticas. La línea padre se busca por estructura: la primera línea anterior con menos
+  // sangría debe ser exactamente `try {` (así, un try ya cerrado antes no cuenta).
+  const sustitucionesSinProteger = (texto, objetos) => {
+    const lineas = texto.replace(/\r/g, '').split('\n');
+    const sangria = (l) => l.match(/^ */)[0].length;
+    const patron = new RegExp(`^\\s*(${objetos.map(o => o.replace(/[^\w]/g, '')).join('|')})\\.(\\w+) = (?!\\w*Original;)`);
+    const problemas = [];
+    lineas.forEach((l, i) => {
+      const m = objetos.length ? l.match(patron) : null;
+      if (!m) return;
+      const nivel = sangria(l);
+      let padre = -1;
+      for (let k = i - 1; k >= 0; k--) {
+        if (!lineas[k].trim()) continue;
+        if (sangria(lineas[k]) < nivel) { padre = k; break; }
+      }
+      const enTry = padre >= 0 && /^\s*try \{$/.test(lineas[padre]) && sangria(lineas[padre]) === nivel - 2;
+      // El cierre del try al mismo nivel que el `try {` debe ser `} finally {` y restaurar el método
+      const cierre = enTry ? lineas.findIndex((x, j) => j > i && x.trim() && sangria(x) === sangria(lineas[padre])) : -1;
+      const finalDe = cierre >= 0 && /^\s*\} finally \{$/.test(lineas[cierre])
+        ? lineas.findIndex((x, j) => j > cierre && x.trim() && sangria(x) === sangria(lineas[padre])) : -1;
+      const restaura = finalDe > cierre && lineas.slice(cierre + 1, finalDe)
+        .some(x => new RegExp(`^\\s*${m[1]}\\.${m[2]} = \\w+Original;$`).test(x));
+      if (!enTry || !restaura) problemas.push(`${i + 1}: ${l.trim()}`);
+    });
+    return problemas;
+  };
+  {
+    // El propio revisor: casos protegidos y sin proteger
+    const protegido = ['  try {', '    X.m = async () => {};', '    await f();', '  } finally {', '    X.m = mOriginal;', '  }'].join('\n');
+    const sinTry = ['  X.m = async () => {};', '  await f();', '  X.m = mOriginal;'].join('\n');
+    const tryCerrado = ['  try {', '    await f();', '  } catch {}', '  X.m = async () => {};'].join('\n');
+    const sinRestaurar = ['  try {', '    X.m = async () => {};', '  } finally {', '    otra();', '  }'].join('\n');
+    const otroMetodo = ['  try {', '    X.m = async () => {};', '  } finally {', '    X.n = nOriginal;', '  }'].join('\n');
+    igual('revisor de sustituciones: protegida -> sin problemas; sin try, try ya cerrado, sin restaurar u otro método -> problema',
+      [protegido, sinTry, tryCerrado, sinRestaurar, otroMetodo].map(t => sustitucionesSinProteger(t, ['X']).length), [0, 1, 1, 1, 1]);
   }
 
-  // Cuentas: la limpieza global (borrado de id > 4, reinicio de la semilla y borrado por patrón)
-  // queda bloqueada también como segunda barrera, por si se quitara el guardián
-  console.log('\n== usuarios.pruebas.js: limpieza global bloqueada (revisión estática)');
+  // ---------- Producción y Cuentas adaptadas: barreras y revisión estática común ----------
+  // Las mismas garantías que Ventas (más abajo), más las propias de cada suite.
+  const revisarSuiteAdaptada = (nombre, archivo, suite, minimoExigirBloqueo) => {
+    const ruta = path.join(__dirname, archivo);
+    console.log(`\n== ${archivo} adaptada: barreras (proceso aislado, sin módulos ni red)`);
+    for (const variable of ['PANSYS_MODO_DEMO', 'PANSYS_SERVIR_FRONTEND']) {
+      for (const valor of ['1', '']) {
+        const r = ejecutarSuite(ruta, false, { [variable]: valor });
+        igual(`${archivo} con ${variable}=${JSON.stringify(valor)}: cancelada con código 1, sin cargar módulos ni usar la red`,
+          [r.status, r.stderr.includes(`Suite de ${nombre} cancelada`), r.stderr.includes(variable), (r.stderr.match(/<<REQUIRE:[^>]*>>/g) ?? []), /<<RED:/.test(r.stderr), r.stdout],
+          [1, true, true, [], false, '']);
+      }
+    }
+    const control = ejecutarSuite(ruta);
+    igual(`${archivo} sin opciones prohibidas (control): pasa la barrera y el arnés bloquea la primera carga (dotenv), sin red`,
+      [/<<REQUIRE:dotenv>>/.test(control.stderr), /<<RED:/.test(control.stderr), control.status !== 0, control.stderr.includes(`Suite de ${nombre} cancelada`)],
+      [true, false, true, false]);
+
+    console.log(`\n== ${archivo} adaptada: revisión estática`);
+    const lineas = fs.readFileSync(ruta, 'utf8').split(/\r?\n/);
+    const codigo = lineas.filter(l => !l.trim().startsWith('//')).join('\n');
+    const instrucciones = lineas.map((l, i) => ({ l, n: i + 1 })).filter(x => x.l.trim() && !x.l.trim().startsWith('//'));
+    igual(`${archivo}: la primera instrucción es la barrera de opciones prohibidas`, instrucciones[0].l.startsWith('const opcionesProhibidas = '), true);
+    const nDbName = lineas.findIndex(l => l.startsWith("process.env.DB_NAME = 'pansys_test';")) + 1;
+    const primera = (re) => lineas.findIndex(l => re.test(l)) + 1;
+    igual(`${archivo}: DB_NAME = pansys_test se fija antes del primer require (dotenv y modelos)`,
+      [nDbName > 0, primera(/require\(/) > nDbName, primera(/require\('\.\.\/src\/models\/index'\)/) > nDbName], [true, true, true]);
+    // DELETE puede aparecer como método HTTP de la API ('DELETE' /api/...): se buscan sentencias SQL
+    const cadenas = [...codigo.matchAll(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g)].map(m => m[0].slice(1, -1));
+    igual(`${archivo}: sin sentencias SQL de escritura (DELETE FROM, INSERT INTO, UPDATE … SET, REPLACE, TRUNCATE) ni LIKE`,
+      [cadenas.some(c => /\b(DELETE\s+FROM|INSERT\s+INTO|REPLACE\s+INTO|TRUNCATE)\b|\bUPDATE\s+[\w.`]+\s+SET\b/i.test(c)), /\b(TRUNCATE|LIKE)\b/.test(codigo)],
+      [false, false]);
+    igual(`${archivo}: toda consulta con sequelize.query es una lectura (SELECT)`,
+      [...codigo.matchAll(/sequelize\.query\(\s*(['"`])([\s\S]*?)\1/g)].map(m => m[2].trim().split(/\s+/)[0].toUpperCase()).every(s => s === 'SELECT'), true);
+    // Un argumento no literal solo se admite como CONSTANTE[clave], con CONSTANTE definida en el
+    // archivo como objeto de cadenas literales que empiezan todas por SELECT
+    igual(`${archivo}: todo SQL no literal de sequelize.query sale de un objeto constante de lecturas SELECT`,
+      [...codigo.matchAll(/sequelize\.query\(\s*([^\s,)]+)/g)].map(m => m[1]).filter(a => !/^['"`]/.test(a)).every((a) => {
+        const nombreConstante = a.match(/^([A-Z][A-Z_]*)\[\w+\]$/)?.[1];
+        const definicion = nombreConstante && codigo.match(new RegExp(`const ${nombreConstante} = \\{([\\s\\S]*?)\\n\\};`))?.[1];
+        if (!definicion) return false;
+        const valores = [...definicion.matchAll(/^\s*\w+:\s*(.*?),?$/gm)].map(m => m[1]);
+        return valores.length > 0 && valores.every(v => /^'SELECT [^']*'$/.test(v));
+      }), true);
+    igual(`${archivo}: sin SQL de escritura construido por concatenación ('DELETE ' + 'FROM ...')`,
+      /(['"`])\s*(DELETE|INSERT|UPDATE|REPLACE|TRUNCATE|DROP|ALTER)\b[^'"`]*\1\s*\+|\+\s*(['"`])\s*(FROM|INTO|SET|TABLE)\b/i.test(codigo), false);
+    igual(`${archivo}: sin escrituras directas con modelos o instancias (create, bulkCreate, update, destroy, save, upsert, increment, decrement, restore)`,
+      /\.(create|bulkCreate|update|destroy|save|upsert|increment|decrement|restore|findOrCreate)\(/.test(codigo), false);
+    igual(`${archivo}: sin vías alternativas de escritura (sequelize.models, getQueryInterface, queryInterface, bulkInsert/Update/Delete, truncate, drop, sync)`,
+      /sequelize\.(models|getQueryInterface|truncate|drop|sync)\b|queryInterface|bulk(Insert|Update|Delete)\b|\.(truncate|drop|sync)\(/.test(codigo), false);
+    igual(`${archivo}: sin ids de la semilla en ninguna forma (id: 1-4, /api/usuarios/1-4, panaderia_id 1-2)`,
+      [/\bid:\s*[1-4]\b/.test(codigo), /\/api\/usuarios\/[1-4]\b/.test(codigo), /panaderia_id(=|:\s*)[12]\b/.test(codigo)], [false, false, false]);
+    // Cada sustitución de un método de modelo (o de console) debe ser hija directa de un try cuyo
+    // finally la restaura con el original guardado (revisión por estructura de bloques, no por sangría)
+    const modelos = (codigo.match(/const \{ ([^}]*) \} = require\('\.\.\/src\/models\/index'\);/)?.[1] ?? '').split(',').map(s => s.trim()).filter(s => s && s !== 'sequelize');
+    const sustituciones = sustitucionesSinProteger(codigo, [...modelos, 'console']);
+    igual(`${archivo}: toda sustitución de métodos de modelo o de console está en un try cuyo finally la restaura`,
+      sustituciones, []);
+    igual(`${archivo}: sin la semilla ni limpiezas globales (restaurarSemilla, id > N, PRUEBA-, contrasena = '!')`,
+      [/restaurarSemilla/.test(codigo), /id\s*>\s*\d/.test(codigo), /PRUEBA-/.test(codigo), /contrasena = '!'/.test(codigo)], [false, false, false, false]);
+    igual(`${archivo}: usa iniciarEjecucion, no construye Ejecucion ni usa la conexión dedicada`,
+      [codigo.includes(`iniciarEjecucion({ suite: '${suite}', sequelize })`), /new Ejecucion/.test(codigo), /bloqueo\.(consultar|verificar|deshacer|liberar)/.test(codigo)],
+      [true, false, false]);
+    igual(`${archivo}: una sola llamada a limpiar() y uso de limpiezaCorrecta y describirPendientes`,
+      [(codigo.match(/await ejecucion\.limpiar\(\)/g) ?? []).length, /limpiezaCorrecta\(limpieza\)/.test(codigo), /describirPendientes\(limpieza\)/.test(codigo)], [1, true, true]);
+    igual(`${archivo}: el código de salida exige cero FALLAS y limpiezaCorrecta`,
+      /const codigo = fallidas === 0 && limpiezaCorrecta\(limpieza\) \? 0 : 1;/.test(codigo), true);
+    igual(`${archivo}: sin tokens ni cuentas semilla (ni correos de la semilla ni id 1-4 en los tokens)`,
+      [/(admin|panadero1|panadero2|gerente1)@pansys\.test/.test(codigo), /\{ id: [1-4],/.test(codigo), /TOKENS\s*=\s*\{\s*[A-Za-z]/.test(codigo)], [false, false, false]);
+    igual(`${archivo}: los tokens firmados llevan version_sesion 0 por defecto`, /version_sesion: 0/.test(codigo), true);
+    igual(`${archivo}: todas las tablas de las consultas llevan pansys_test. o son information_schema`,
+      [...codigo.matchAll(/\b(?:FROM|JOIN)\s+([A-Za-z_][\w.]*)/g)].map(m => m[1]).every(t => t.startsWith('pansys_test.') || t.startsWith('information_schema.')), true);
+    igual(`${archivo}: no envía peticiones hasta confirmar la identidad (URL nula hasta el runId)`,
+      [/if \(!URL[^)]*\) throw/.test(codigo), /URL = base;/.test(codigo), /identidad\?\.runId !== ejecucion\.runId/.test(codigo)], [true, true, true]);
+    igual(`${archivo}: cierre en orden: servidor, limpiar, cerrar y Sequelize`,
+      (() => { const i = ['await cerrarServidor()', 'await ejecucion.limpiar()', 'await ejecucion.cerrar()', 'await sequelize.close()'].map(t => codigo.indexOf(t)); return i.every(x => x > 0) && i.every((x, k) => k === 0 || x > i[k - 1]); })(),
+      true);
+    igual(`${archivo}: exigirBloqueo antes de cada bloque (al menos ${minimoExigirBloqueo} llamadas)`,
+      (codigo.match(/await ejecucion\.exigirBloqueo\(\);/g) ?? []).length >= minimoExigirBloqueo, true);
+    igual(`${archivo}: sin PORT_PRUEBAS ni el guardián anterior (process.exit solo en las barreras y al final)`,
+      [/PORT_PRUEBAS/.test(codigo), /DESHABILITADA|Suite deshabilitada/.test(codigo), (codigo.match(/process\.exit\(/g) ?? []).length], [false, false, 3]);
+    return codigo;
+  };
+
   {
-    const textoCuentas = fs.readFileSync(path.join(__dirname, 'usuarios.pruebas.js'), 'utf8').replace(/\r/g, '');
-    const codigoCuentas = textoCuentas.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
-    igual('restaurarSemilla solo lanza un error (sin ninguna consulta)',
-      /const restaurarSemilla = async \(\) => \{\s*throw new Error\('Suite deshabilitada: [^']*'\);\s*\};/.test(codigoCuentas), true);
-    igual('sin el borrado de cuentas con id > 4 ni el reinicio de contraseñas de la semilla',
-      [/DELETE FROM usuarios/i.test(textoCuentas), /id\s*>\s*4/.test(codigoCuentas), /contrasena = '!'/.test(codigoCuentas)], [false, false, false]);
-    igual('sin el borrado de insumos por patrón (LIKE) en ningún sitio', /\bLIKE\b/.test(codigoCuentas), false);
-    igual('ninguna consulta SQL de escritura en el archivo (solo lecturas con sequelize.query)',
-      [...codigoCuentas.matchAll(/sequelize\.query\(\s*(['"`])([\s\S]*?)\1/g)].map(m => m[2].trim().split(/\s+/)[0].toUpperCase()).every(s => s === 'SELECT'), true);
-    igual('el finally ya no restaura la semilla ni borra datos',
-      (() => { const f = codigoCuentas.slice(codigoCuentas.lastIndexOf('.finally(')); return [/restaurarSemilla\(/.test(f), /sequelize\.query\(/.test(f), /destroy\(/.test(f)]; })(),
-      [false, false, false]);
-    igual('en main, la primera operación tras verificar la base es la barrera restaurarSemilla()',
-      /baseVerificada = true;\s*await restaurarSemilla\(\);/.test(codigoCuentas), true);
+    const codigo = revisarSuiteAdaptada('Producción', 'produccion.pruebas.js', 'produccion', 12);
+    igual('produccion.pruebas.js: sin el precio negativo fijado en la base (cubierto en produccion.unitarias.js)',
+      [/precio_unitario = -/.test(codigo), /-5\b/.test(codigo)], [false, false]);
+    igual('produccion.pruebas.js: lecturas, recuentos e invariantes limitados a A y B (panaderia_id IN (?) con propias())',
+      [(codigo.match(/panaderia_id (NOT )?IN \(\?\)/g) ?? []).length >= 10, /replacements: \[propias\(\)\]/.test(codigo), /FROM pansys_test\.orden_produccion'/.test(codigo)], [true, true, false]);
+    const sinRetornos = codigo.replace(/\r/g, '');
+    igual('produccion.pruebas.js: InsumoUsado.bulkCreate y console.error se restauran en un finally',
+      /finally \{\s*InsumoUsado\.bulkCreate = bulkCreateOriginal;\s*console\.error = errorOriginal;\s*\}/.test(sinRetornos), true);
+    igual('produccion.pruebas.js: las dos sustituciones de OrdenProduccion.create se restauran en un finally',
+      (sinRetornos.match(/finally \{\s*OrdenProduccion\.create = createOriginal;\s*\}/g) ?? []).length, 2);
+    igual('produccion.pruebas.js: toda sustitución de un método de modelo va dentro de un try',
+      [...sinRetornos.matchAll(/^( *)(InsumoUsado\.bulkCreate|OrdenProduccion\.create) = async/gm)].every(m => m[1].length >= 4), true);
+  }
+  {
+    const codigo = revisarSuiteAdaptada('Cuentas', 'usuarios.pruebas.js', 'usuarios', 12);
+    igual('usuarios.pruebas.js: toda lectura de usuarios (comillas simples o plantillas) se limita a cuentas propias o a correos marcados exactos',
+      [...codigo.matchAll(/(['`])(SELECT [^'`]*FROM pansys_test\.usuarios[^'`]*)\1/g)].map(m => m[2])
+        .every(s => /id IN \(\?\)|email IN \(\?\)/.test(s) || /WHERE id = \?$/.test(s)), true);
+    igual('usuarios.pruebas.js: ninguna mención a la tabla usuarios fuera de esas lecturas',
+      (codigo.match(/pansys_test\.usuarios/g) ?? []).length, [...codigo.matchAll(/(['`])(SELECT [^'`]*FROM pansys_test\.usuarios[^'`]*)\1/g)].length);
+    igual('usuarios.pruebas.js: los administradores activos solo se cuentan entre cuentas propias indicadas',
+      /rol_id = 1 AND estado = 1'/.test(codigo) && !/WHERE rol_id = 1/.test(codigo) && /WHERE id IN \(\?\) AND id IN \(\?\) AND rol_id = 1 AND estado = 1/.test(codigo), true);
+    igual('usuarios.pruebas.js: sin correos escritos en el código (todos salen de ejecucion.correo())',
+      /['"][^'"\s]*@[^'"\s]*['"]/.test(codigo), false);
+    igual('usuarios.pruebas.js: de los modelos solo importa sequelize y Usuario (sin MateriaPrima ni otros)',
+      /const \{ sequelize, Usuario \} = require\('\.\.\/src\/models\/index'\);/.test(codigo) && !/MateriaPrima/.test(codigo), true);
+    igual('usuarios.pruebas.js: Usuario solo se usa para envolver y restaurar findAll y findByPk (observador de solapamiento)',
+      [...codigo.matchAll(/\bUsuario\.(\w+)/g)].map(m => m[1]).every(m => m === 'findAll' || m === 'findByPk'), true);
+    igual('usuarios.pruebas.js: el 409 del último administrador se prueba en usuarios.unitarias.js (no en la suite)',
+      /asegurarOtroAdministradorActivo/.test(codigo), false);
+    igual('usuarios.pruebas.js: una sola vía hacia POST /api/auth/registrar (pedirRegistro), que registra todo 201',
+      [(codigo.match(/'\/api\/auth\/registrar'/g) ?? []).length,
+        /const pedirRegistro = async \(usuario, cuerpo\) => \{\s*const r = await pedir\('POST', '\/api\/auth\/registrar', usuario, cuerpo\);\s*if \(r\.status === 201 && Number\.isSafeInteger\(r\.datos\?\.id\)\) ejecucion\.registrar\('usuarios', r\.datos\.id\);/.test(codigo)],
+      [1, true]);
+    igual('usuarios.pruebas.js: la prueba concurrente usa el observador de solapamiento con esperas limitadas',
+      [/crearObservadorSolapamiento\(\{ esBloqueo: esBloqueoAdministradores, pausaMs: 500, limiteMs: 5000 \}\)/.test(codigo),
+        /solapamiento\.otraEsperabaTrasPausa, true\)/.test(codigo)], [true, true]);
+    igual('usuarios.pruebas.js: el id inexistente se comprueba antes de cada petición que lo usaría para escribir',
+      (codigo.match(/await exigirInexistente\('(usuarios|panaderias)'\);/g) ?? []).length, 4);
   }
 
   // ---------- Ventas adaptada: barreras y revisión estática ----------
