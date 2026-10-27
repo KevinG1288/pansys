@@ -22,7 +22,7 @@ class AuthController {
 
   async registrar(req, res) {
     try {
-      const { email, contrasena, rol_id, panaderia_id } = req.body;
+      const { email, contrasena, rol_id, panaderia_id } = req.body ?? {};
 
       if (!email || !contrasena || !rol_id) {
         return res.status(400).json({ error: 'Todos los campos son requeridos' });
@@ -32,7 +32,8 @@ class AuthController {
       res.status(201).json(resultado);
 
     } catch (error) {
-      res.status(400).json({ error: error.message });
+      // 400 con el mensaje de la validación; cualquier error interno es un 500 sin detalles
+      responderError(res, error);
     }
   }
 

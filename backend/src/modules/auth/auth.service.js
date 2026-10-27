@@ -39,14 +39,14 @@ class AuthService {
     // Solo se admiten los tres roles del sistema
     const rolId = Number(rol_id);
     if (!Object.values(ROLES).includes(rolId)) {
-      throw new Error('Rol inválido');
+      throw new ErrorNegocio('Rol inválido', 400);
     }
 
     // El administrador general no pertenece a una panadería; los demás roles sí
     let panaderiaId = null;
     if (rolId === ROLES.ADMINISTRADOR) {
       if (panaderia_id) {
-        throw new Error('El administrador general no se asigna a una panadería');
+        throw new ErrorNegocio('El administrador general no se asigna a una panadería', 400);
       }
     } else {
       panaderiaId = Number(panaderia_id);
@@ -54,14 +54,15 @@ class AuthService {
         ? await Panaderia.findByPk(panaderiaId)
         : null;
       if (!panaderia) {
-        throw new Error('Debe indicar una panadería válida para este rol');
+        throw new ErrorNegocio('Debe indicar una panadería válida para este rol', 400);
       }
     }
 
     // Verificar si ya existe
     const existe = await Usuario.findOne({ where: { email } });
     if (existe) {
-      throw new Error('El email ya está registrado');
+      // 400 (no 409): contrato de siempre de /registrar
+      throw new ErrorNegocio('El email ya está registrado', 400);
     }
 
     // Cifrar contraseña
