@@ -1,5 +1,5 @@
 const ventasService = require('./ventas.service');
-const { responderError } = require('../../utils/errores');
+const { responderError, responderErrorDeDatos } = require('../../utils/errores');
 
 class VentasController {
 
@@ -8,7 +8,7 @@ class VentasController {
       const ventas = await ventasService.getAll(req.panaderiaId);
       res.json(ventas);
     } catch (error) {
-      res.status(500).json({ error: error.message });
+      responderError(res, error);
     }
   }
 
@@ -28,7 +28,7 @@ class VentasController {
       const productos = await ventasService.getProductos(req.panaderiaId);
       res.json(productos);
     } catch (error) {
-      res.status(500).json({ error: error.message });
+      responderError(res, error);
     }
   }
 
@@ -37,7 +37,8 @@ class VentasController {
       const producto = await ventasService.crearProducto(req.body, req.panaderiaId);
       res.status(201).json(producto);
     } catch (error) {
-      res.status(400).json({ error: error.message });
+      // 400 si faltan campos o un valor no es válido; cualquier error interno es un 500 sin detalles
+      responderErrorDeDatos(res, error, ventasService.CAMPOS_PRODUCTO);
     }
   }
 }

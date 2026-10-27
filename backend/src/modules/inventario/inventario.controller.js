@@ -1,4 +1,5 @@
 const inventarioService = require('./inventario.service');
+const { responderError, responderErrorDeDatos } = require('../../utils/errores');
 
 class InventarioController {
 
@@ -7,7 +8,7 @@ class InventarioController {
       const items = await inventarioService.getAll(req.panaderiaId);
       res.json(items);
     } catch (error) {
-      res.status(500).json({ error: error.message });
+      responderError(res, error);
     }
   }
 
@@ -16,7 +17,8 @@ class InventarioController {
       const item = await inventarioService.getById(req.params.id, req.panaderiaId);
       res.json(item);
     } catch (error) {
-      res.status(404).json({ error: error.message });
+      // 404 materia prima no encontrada; cualquier error interno es un 500 sin detalles
+      responderError(res, error);
     }
   }
 
@@ -25,7 +27,8 @@ class InventarioController {
       const item = await inventarioService.crear(req.body, req.panaderiaId);
       res.status(201).json(item);
     } catch (error) {
-      res.status(400).json({ error: error.message });
+      // 400 si faltan campos o un valor no es válido; cualquier error interno es un 500 sin detalles
+      responderErrorDeDatos(res, error, inventarioService.CAMPOS_EDITABLES);
     }
   }
 
@@ -34,7 +37,8 @@ class InventarioController {
       const item = await inventarioService.actualizar(req.params.id, req.body, req.panaderiaId);
       res.json(item);
     } catch (error) {
-      res.status(400).json({ error: error.message });
+      // 400 si no existe, faltan campos o un valor no es válido; cualquier error interno es un 500
+      responderErrorDeDatos(res, error, inventarioService.CAMPOS_EDITABLES);
     }
   }
 
@@ -43,7 +47,8 @@ class InventarioController {
       const resultado = await inventarioService.eliminar(req.params.id, req.panaderiaId);
       res.json(resultado);
     } catch (error) {
-      res.status(400).json({ error: error.message });
+      // 400 materia prima no encontrada; cualquier error interno es un 500 sin detalles
+      responderError(res, error);
     }
   }
 
@@ -52,7 +57,7 @@ class InventarioController {
       const items = await inventarioService.verificarStockBajo(req.panaderiaId);
       res.json(items);
     } catch (error) {
-      res.status(500).json({ error: error.message });
+      responderError(res, error);
     }
   }
 }

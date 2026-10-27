@@ -1,5 +1,6 @@
 const ROLES = require('../config/roles');
 const { Panaderia } = require('../models/index');
+const { responderError } = require('../utils/errores');
 
 // Restringe la ruta a los roles indicados (usa rol_id del token)
 const permitirRoles = (...rolesPermitidos) => (req, res, next) => {
@@ -51,7 +52,8 @@ const resolverPanaderia = ({ requerida = true } = {}) => async (req, res, next) 
     req.panaderiaId = id;
     next();
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    // Solo puede fallar la consulta de la panadería: error interno, 500 sin detalles
+    responderError(res, error);
   }
 };
 

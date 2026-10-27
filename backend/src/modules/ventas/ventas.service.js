@@ -107,11 +107,13 @@ class VentasService {
   }
 
   async crearProducto(datos, panaderiaId) {
+    // Sin cuerpo (petición sin JSON) no se envía ningún campo: el modelo responde qué falta
     const campos = Object.fromEntries(
-      CAMPOS_PRODUCTO.filter(c => datos[c] !== undefined).map(c => [c, datos[c]])
+      CAMPOS_PRODUCTO.filter(c => datos?.[c] !== undefined).map(c => [c, datos[c]])
     );
     return await Producto.create({ ...campos, panaderia_id: panaderiaId });
   }
 }
 
 module.exports = new VentasService();
+module.exports.CAMPOS_PRODUCTO = CAMPOS_PRODUCTO;

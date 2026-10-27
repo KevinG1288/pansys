@@ -1,4 +1,5 @@
 const { MateriaPrima } = require('../../models/index');
+const { ErrorNegocio } = require('../../utils/errores');
 const { parsearCantidad, deUnidades } = require('../produccion/produccion.validaciones');
 
 // Campos que el cliente puede enviar al crear o editar (panaderia_id y estado los fija el servidor)
@@ -29,9 +30,10 @@ class InventarioService {
     });
   }
 
-  async getById(id, panaderiaId) {
+  // Contrato de siempre: 404 al consultarla, 400 al editarla o eliminarla
+  async getById(id, panaderiaId, estadoNoEncontrada = 404) {
     const item = await MateriaPrima.findOne({ where: condicionPorId(id, panaderiaId) });
-    if (!item) throw new Error('Materia prima no encontrada');
+    if (!item) throw new ErrorNegocio('Materia prima no encontrada', estadoNoEncontrada);
     return item;
   }
 
@@ -41,12 +43,12 @@ class InventarioService {
 
   async actualizar(id, datos, panaderiaId) {
     const campos = filtrarCampos(datos);
-    const item = await this.getById(id, panaderiaId);
+    const item = await this.getById(id, panaderiaId, 400);
     return await item.update(campos);
   }
 
   async eliminar(id, panaderiaId) {
-    const item = await this.getById(id, panaderiaId);
+    const item = await this.getById(id, panaderiaId, 400);
     await item.update({ estado: false });
     return { mensaje: 'Materia prima eliminada correctamente' };
   }
@@ -60,3 +62,4 @@ class InventarioService {
 }
 
 module.exports = new InventarioService();
+module.exports.CAMPOS_EDITABLES = CAMPOS_EDITABLES;
