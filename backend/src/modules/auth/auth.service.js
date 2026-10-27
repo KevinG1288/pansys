@@ -1,5 +1,5 @@
 const bcrypt = require('bcrypt');
-const { sequelize, Usuario, Rol, Panaderia } = require('../../models/index');
+const { sequelize, Usuario, Rol } = require('../../models/index');
 const ROLES = require('../../config/roles');
 const { ErrorNegocio } = require('../../utils/errores');
 const { validarContrasenaNueva } = require('../../utils/contrasenas');
@@ -31,32 +31,29 @@ class AuthService {
     return firmarSesion(usuario, usuario.Rol.nombre);
   }
 
-  async registrar(emailRecibido, contrasena, rol_id, panaderia_id) {
+  // Alta de cuentas por el administrador de una panadería: solo panaderos y gerentes, y siempre
+  // en la panadería de quien actúa. Los administradores no se crean por esta vía.
+  async registrar(actorId, emailRecibido, contrasena, rol_id) {
+    // El rol del token puede estar desactualizado: quien actúa debe ser, según la base de datos,
+    // un administrador activo con panadería asignada
+    const actor = await Usuario.findByPk(actorId, { attributes: ['id', 'rol_id', 'panaderia_id', 'estado'] });
+    if (!actor || !actor.estado || actor.rol_id !== ROLES.ADMINISTRADOR || !actor.panaderia_id) {
+      throw new ErrorNegocio('No tiene permisos para realizar esta acción', 403);
+    }
+
     // Misma política que el cambio de contraseña y la interfaz (lib/validacion.js)
     const email = parsearEmail(emailRecibido);
     validarContrasenaNueva(contrasena, 'La contraseña');
 
-    // Solo se admiten los tres roles del sistema
+    // Solo se admiten los tres roles del sistema, y por esta vía solo panadero y gerente
     const rolId = Number(rol_id);
     if (!Object.values(ROLES).includes(rolId)) {
       throw new ErrorNegocio('Rol inválido', 400);
     }
-
-    // El administrador general no pertenece a una panadería; los demás roles sí
-    let panaderiaId = null;
     if (rolId === ROLES.ADMINISTRADOR) {
-      if (panaderia_id) {
-        throw new ErrorNegocio('El administrador general no se asigna a una panadería', 400);
-      }
-    } else {
-      panaderiaId = Number(panaderia_id);
-      const panaderia = Number.isInteger(panaderiaId) && panaderiaId > 0
-        ? await Panaderia.findByPk(panaderiaId)
-        : null;
-      if (!panaderia) {
-        throw new ErrorNegocio('Debe indicar una panadería válida para este rol', 400);
-      }
+      throw new ErrorNegocio('No tiene permisos para crear administradores', 403);
     }
+    const panaderiaId = actor.panaderia_id;
 
     // Verificar si ya existe
     const existe = await Usuario.findOne({ where: { email } });

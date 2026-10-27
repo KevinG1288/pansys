@@ -15,7 +15,8 @@ const { spawnSync } = require('child_process');
 const {
   NOMBRE_BLOQUEO, ErrorAislamiento, verificarConfiguracion, iniciarEjecucion, Ejecucion, abrirBloqueo,
   PLANTILLA_CUENTA, PLANTILLA_PANADERIA, PLANTILLA_PRODUCTO, limpiezaCorrecta, describirPendientes,
-  SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS
+  SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS, PLANTILLA_ASIGNAR_PANADERIA, SQL_PROPIETARIAS_ASIGNADAS,
+  SQL_DESASIGNAR_PROPIETARIAS
 } = require('./aislamiento');
 
 const resultados = [];
@@ -88,11 +89,11 @@ const filtrar = (db, nombreTabla, where, params) => {
       const col = m[1];
       return f => f[col] !== null && f[col] !== undefined;
     }
-    if ((m = condicion.match(/^(\w+) (NOT IN|IN) \(SELECT id FROM pansys_test\.(\w+) WHERE (\w+) IN \(\?\)\)$/))) {
-      const [, col, op, madre, colMadre] = m;
+    if ((m = condicion.match(/^(\w+) (NOT IN|IN) \(SELECT (\w+) FROM pansys_test\.(\w+) WHERE (\w+) IN \(\?\)\)$/))) {
+      const [, col, op, colSeleccion, madre, colMadre] = m;
       const lista = valores.shift();
       if (!Array.isArray(lista) || !lista.length) throw errorMysql('ER_PARSE_ERROR', 'IN () vacío');
-      const ids = new Set(db[madre].filter(f => lista.includes(f[colMadre])).map(f => f.id));
+      const ids = new Set(db[madre].filter(f => lista.includes(f[colMadre])).map(f => f[colSeleccion]));
       return f => (op === 'IN' ? ids.has(f[col]) : f[col] !== null && !ids.has(f[col]));
     }
     if ((m = condicion.match(/^(\w+) (NOT IN|IN) \(\?\)$/))) {
@@ -229,6 +230,24 @@ class ConexionDoble extends EventEmitter {
       // Gancho para simular un resultado incierto DESPUÉS de aplicar el INSERT
       if (s.trasInsert) s.trasInsert(this, fila);
       return [s.respuestaInsert ?? { insertId: fila.id, affectedRows: 1 }];
+    }
+    // Asignación protegida (texto exacto): una administradora sin panadería, por id y correo
+    if (consulta === PLANTILLA_ASIGNAR_PANADERIA) {
+      const [panaderiaId, id, email] = params;
+      if (!s.db.panaderias.some(p => p.id === panaderiaId)) {
+        throw Object.assign(new Error('ER_NO_REFERENCED_ROW_2'), { errno: 1452, code: 'ER_NO_REFERENCED_ROW_2', sqlState: '23000', fatal: false });
+      }
+      const filas = s.db.usuarios.filter(u => u.id === id && u.email === email && u.rol_id === 1 && (u.panaderia_id ?? null) === null);
+      filas.forEach(u => { u.panaderia_id = panaderiaId; });
+      if (s.trasAsignar) s.trasAsignar(this);
+      return [s.respuestaAsignar ?? { affectedRows: filas.length }];
+    }
+    // Desasignación de la limpieza (texto exacto; el WHERE lo evalúa filtrar)
+    if (consulta === SQL_DESASIGNAR_PROPIETARIAS) {
+      const where = consulta.replace(/^UPDATE pansys_test\.usuarios SET panaderia_id = NULL WHERE /, '');
+      const filas = filtrar(s.db, 'usuarios', where, params);
+      filas.forEach(u => { u.panaderia_id = null; });
+      return [s.respuestaDesasignar ?? { affectedRows: filas.length }];
     }
     if ((m = consulta.match(/^DELETE FROM pansys_test\.(\w+) WHERE (.+)$/))) {
       const ids = filtrar(s.db, m[1], m[2], params).map(f => f.id);
@@ -920,6 +939,137 @@ const main = async () => {
     await ej.cerrar();
   }
 
+  // ---------- Un administrador por panadería: asignarPanaderia y limpieza del ciclo ----------
+  // La administradora es propietaria de su panadería (panaderias.usuario_id, CASCADE) y está
+  // asignada a ella (usuarios.panaderia_id, RESTRICT): sin desasignarla antes, borrarla como
+  // empleada arrastraría su panadería y el doble (como InnoDB) lo rechazaría.
+  console.log('\n== asignarPanaderia y limpieza con un administrador por panadería');
+  const cicloPropio = async (ej) => {
+    const admin = await ej.crearCuenta({ etiqueta: 'admin', rol: 'administrador', activa: true });
+    const pan = await ej.crearPanaderia({ etiqueta: 'Ciclo', propietariaId: admin });
+    return { admin, pan };
+  };
+  {
+    const { servidor, ej, conexion, ajenos } = await preparar({ propios: false });
+    const { admin, pan } = await cicloPropio(ej);
+    const inicio = conexion.registro.length;
+    igual('asignarPanaderia devuelve el id de la cuenta', await ej.asignarPanaderia({ cuentaId: admin, panaderiaId: pan }), admin);
+    igual('asignación: bloqueo, base y la plantilla exacta (una sola sentencia de escritura)', conexion.registro.slice(inicio), [
+      'SELECT IS_USED_LOCK(?) AS dueno', 'SELECT DATABASE() AS base', PLANTILLA_ASIGNAR_PANADERIA
+    ]);
+    igual('la administradora queda en su panadería y sigue siendo su propietaria',
+      [servidor.db.usuarios.find(u => u.id === admin)?.panaderia_id, servidor.db.panaderias.find(p => p.id === pan)?.usuario_id], [pan, admin]);
+    const panadero = await ej.crearCuenta({ etiqueta: 'panadero', rol: 'panadero', panaderiaId: pan, activa: true });
+    const adminB = await ej.crearCuenta({ etiqueta: 'adminb', rol: 'administrador', panaderiaId: pan, activa: true });
+    igual('una administradora también se puede crear directamente en una panadería propia',
+      [servidor.db.usuarios.find(u => u.id === adminB)?.panaderia_id, ej.ids('usuarios')], [pan, [admin, panadero, adminB].sort((a, b) => a - b)]);
+    servidor.db.materia_prima.push({ id: 32, panaderia_id: pan });
+    const limpieza = await ej.limpiar();
+    igual('limpieza con el ciclo: correcta y lo ajeno queda idéntico',
+      [limpieza.ok, limpieza.resultado, JSON.stringify(servidor.db) === JSON.stringify(ajenos)], [true, 'limpia', true]);
+    igual('recuentos: 1 propietaria desasignada, 2 empleadas, 1 panadería, 1 propietaria', [
+      limpieza.borrados['usuarios (propietarias desasignadas)'], limpieza.borrados['usuarios (empleados)'],
+      limpieza.borrados.panaderias, limpieza.borrados['usuarios (propietarias)']
+    ], [1, 2, 1, 1]);
+    const iDetalles = conexion.registro.findIndex(esConsultaDetallesAjenos);
+    const iRecuento = conexion.registro.indexOf(SQL_PROPIETARIAS_ASIGNADAS);
+    const iDesasignar = conexion.registro.indexOf(SQL_DESASIGNAR_PROPIETARIAS);
+    const iPrimerDelete = conexion.registro.findIndex(s => s.startsWith('DELETE'));
+    const iCommit = conexion.registro.indexOf('COMMIT');
+    igual('la desasignación va después de las comprobaciones previas y antes del primer DELETE',
+      [iDetalles < iRecuento, iRecuento < iDesasignar, iDesasignar < iPrimerDelete], [true, true, true]);
+    igual('justo antes de la última comprobación del bloqueo y del COMMIT: ninguna cuenta ni panadería propia', conexion.registro.slice(iCommit - 3, iCommit), [
+      'SELECT COUNT(*) AS n FROM pansys_test.usuarios WHERE id IN (?)', 'SELECT COUNT(*) AS n FROM pansys_test.panaderias WHERE id IN (?)',
+      'SELECT IS_USED_LOCK(?) AS dueno'
+    ]);
+    await ej.cerrar();
+  }
+  {
+    // Sin desasignación (respuesta simulada de 0 filas): la limpieza no sigue y lo deshace todo
+    const { servidor, ej } = await preparar({ propios: false });
+    const { admin, pan } = await cicloPropio(ej);
+    await ej.asignarPanaderia({ cuentaId: admin, panaderiaId: pan });
+    const antes = copiar(servidor.db);
+    servidor.respuestaDesasignar = { affectedRows: 0 };
+    const limpieza = await ej.limpiar();
+    igual('desasignación con un número de filas distinto -> ROLLBACK y nada cambia',
+      [limpieza.resultado, limpiezaCorrecta(limpieza), JSON.stringify(servidor.db) === JSON.stringify(antes)], ['revertida', false, true]);
+    await ej.cerrar();
+  }
+  {
+    // Una fila propia que sigue existiendo tras los DELETE (simulado) impide el COMMIT
+    const { servidor, ej } = await preparar({ propios: false });
+    const { admin, pan } = await cicloPropio(ej);
+    await ej.asignarPanaderia({ cuentaId: admin, panaderiaId: pan });
+    const antes = copiar(servidor.db);
+    // El mismo recuento lo usa antes el paso de las propietarias: la 2.ª vez es la comprobación final
+    let vistas = 0;
+    servidor.antes = (sql) => {
+      if (sql === 'SELECT COUNT(*) AS n FROM pansys_test.usuarios WHERE id IN (?)' && ++vistas === 2) {
+        servidor.antes = null;
+        servidor.db.usuarios.push({ id: admin, email: 'resto', panaderia_id: null });
+      }
+    };
+    const limpieza = await ej.limpiar();
+    igual('fila propia restante antes del COMMIT -> ROLLBACK, motivo informado y nada cambia',
+      [limpieza.resultado, /Quedan 1 filas propias en usuarios/.test(limpieza.motivo), JSON.stringify(servidor.db) === JSON.stringify(antes)],
+      ['revertida', true, true]);
+    await ej.cerrar();
+  }
+  {
+    const { servidor, ej, conexion } = await preparar({ propios: false });
+    const { admin, pan } = await cicloPropio(ej);
+    const panadero = await ej.crearCuenta({ etiqueta: 'panadero', rol: 'panadero', panaderiaId: pan, activa: true });
+    const adminB = await ej.crearCuenta({ etiqueta: 'adminb', rol: 'administrador', panaderiaId: pan, activa: true });
+    const casos = [
+      ['cuenta de la semilla', { cuentaId: 1, panaderiaId: pan }],
+      ['cuenta ajena 5', { cuentaId: 5, panaderiaId: pan }],
+      ['cuenta propia que no es administradora', { cuentaId: panadero, panaderiaId: pan }],
+      ['administradora creada ya con panadería', { cuentaId: adminB, panaderiaId: pan }],
+      ['panadería de la semilla', { cuentaId: admin, panaderiaId: 1 }],
+      ['panadería sin registrar', { cuentaId: admin, panaderiaId: 99 }],
+      ['id como texto', { cuentaId: String(admin), panaderiaId: pan }],
+      ['sin argumentos', undefined]
+    ];
+    for (const [descripcion, opciones] of casos) {
+      const n = conexion.registro.length;
+      const error = await falla(() => ej.asignarPanaderia(opciones));
+      igual(`asignarPanaderia rechazada (${descripcion}): sin ninguna consulta y la ejecución sigue activa`,
+        [error instanceof ErrorAislamiento, conexion.registro.length - n, ej.estado], [true, 0, 'activa']);
+    }
+    await ej.asignarPanaderia({ cuentaId: admin, panaderiaId: pan });
+    const n = conexion.registro.length;
+    igual('una administradora ya asignada no se vuelve a asignar (sin consultas)',
+      [(await falla(() => ej.asignarPanaderia({ cuentaId: admin, panaderiaId: pan }))) instanceof ErrorAislamiento, conexion.registro.length - n], [true, 0]);
+    igual('los rechazos no cambiaron ninguna fila', servidor.db.usuarios.filter(u => [panadero, adminB].includes(u.id)).map(u => u.panaderia_id), [pan, pan]);
+    await ej.cerrar();
+  }
+  {
+    // 0 filas actualizadas con respuesta válida: se detienen las escrituras; la limpieza sigue
+    const { servidor, ej, ajenos } = await preparar({ propios: false });
+    const { admin, pan } = await cicloPropio(ej);
+    servidor.respuestaAsignar = { affectedRows: 0 };
+    const error = await falla(() => ej.asignarPanaderia({ cuentaId: admin, panaderiaId: pan }));
+    igual('asignación sin filas -> error, escrituras detenidas y ejecución activa',
+      [error instanceof ErrorAislamiento, Boolean(ej.escriturasDetenidas), ej.estado], [true, true, 'activa']);
+    igual('con las escrituras detenidas no se crean más cuentas',
+      (await falla(() => ej.crearCuenta({ etiqueta: 'otra', rol: 'panadero', panaderiaId: pan, activa: true }))) instanceof ErrorAislamiento, true);
+    const limpieza = await ej.limpiar();
+    igual('la limpieza borra lo registrado aunque la asignación no se confirmara',
+      [limpieza.ok, JSON.stringify(servidor.db) === JSON.stringify(ajenos)], [true, true]);
+    await ej.cerrar();
+  }
+  {
+    // Conexión perdida durante la asignación: resultado incierto y ejecución abortada (no se limpia)
+    const { servidor, ej } = await preparar({ propios: false });
+    const { admin, pan } = await cicloPropio(ej);
+    servidor.trasAsignar = (c) => { c.perder(); throw errorMysql('PROTOCOL_CONNECTION_LOST', 'Connection lost'); };
+    const error = await falla(() => ej.asignarPanaderia({ cuentaId: admin, panaderiaId: pan }));
+    igual('asignación con la conexión perdida -> error, bloqueo perdido y ejecución abortada',
+      [error instanceof ErrorAislamiento, ej.bloqueo.perdido, ej.estado], [true, true, 'abortada']);
+    await ej.cerrar();
+  }
+
   console.log('\n== Escrituras protegidas: rechazos sin enviar nada');
   {
     const { ej, conexion } = await preparar({ propios: false });
@@ -935,7 +1085,8 @@ const main = async () => {
       ['rol heredado de Object', () => ej.crearCuenta({ etiqueta: 'x2', rol: 'toString', activa: false })],
       ['activa como texto', () => ej.crearCuenta({ etiqueta: 'x3', rol: 'administrador', activa: 'true' })],
       ['activa ausente', () => ej.crearCuenta({ etiqueta: 'x4', rol: 'administrador' })],
-      ['administradora con panadería', () => ej.crearCuenta({ etiqueta: 'x5', rol: 'administrador', panaderiaId: pan, activa: false })],
+      ['administradora en una panadería sin registrar', () => ej.crearCuenta({ etiqueta: 'x5', rol: 'administrador', panaderiaId: 99, activa: false })],
+      ['administradora en la panadería semilla 1', () => ej.crearCuenta({ etiqueta: 'x9', rol: 'administrador', panaderiaId: 1, activa: false })],
       ['panadero sin panadería', () => ej.crearCuenta({ etiqueta: 'x6', rol: 'panadero', activa: true })],
       ['panadero en la panadería semilla 1', () => ej.crearCuenta({ etiqueta: 'x7', rol: 'panadero', panaderiaId: 1, activa: true })],
       ['gerente en una panadería sin registrar', () => ej.crearCuenta({ etiqueta: 'x8', rol: 'gerente', panaderiaId: 99, activa: true })],
@@ -1756,8 +1907,19 @@ const main = async () => {
     (sinComentarios.match(/INSERT INTO\s+\S+/g) ?? []), ['INSERT INTO pansys_test.usuarios', 'INSERT INTO pansys_test.panaderias', 'INSERT INTO pansys_test.productos']);
   igual('plantilla de producto exacta', PLANTILLA_PRODUCTO,
     'INSERT INTO pansys_test.productos (nombre, precio_compra, precio_venta, cantidad_disponible, panaderia_id, estado, createdAt, updatedAt) VALUES (?, 0, ?, ?, ?, ?, NOW(), NOW())');
-  igual('el código solo contiene un DELETE (el de la limpieza) y ningún UPDATE, REPLACE, DROP ni ALTER en SQL',
-    [(sinComentarios.match(/DELETE FROM/g) ?? []).length, /['"`]\s*(UPDATE|REPLACE|DROP|ALTER)\s/i.test(sinComentarios)], [1, false]);
+  igual('plantilla de asignación exacta (una fila: id, correo marcado, administradora sin panadería)', PLANTILLA_ASIGNAR_PANADERIA,
+    'UPDATE pansys_test.usuarios SET panaderia_id = ? WHERE id = ? AND email = ? AND rol_id = 1 AND panaderia_id IS NULL');
+  igual('recuento y desasignación de propietarias con el mismo WHERE, solo sobre ids propios', [SQL_PROPIETARIAS_ASIGNADAS, SQL_DESASIGNAR_PROPIETARIAS], [
+    'SELECT COUNT(*) AS n FROM pansys_test.usuarios WHERE id IN (?) AND panaderia_id IN (?) AND id IN (SELECT usuario_id FROM pansys_test.panaderias WHERE id IN (?))',
+    'UPDATE pansys_test.usuarios SET panaderia_id = NULL WHERE id IN (?) AND panaderia_id IN (?) AND id IN (SELECT usuario_id FROM pansys_test.panaderias WHERE id IN (?))'
+  ]);
+  igual('el código solo contiene un DELETE (el de la limpieza), los dos UPDATE anteriores y ningún REPLACE, DROP ni ALTER en SQL', [
+    (sinComentarios.match(/DELETE FROM/g) ?? []).length,
+    (sinComentarios.match(/['"`]\s*UPDATE\s[^'"`]*/gi) ?? []).map(s => s.replace(/^['"`]\s*/, '')),
+    /['"`]\s*(REPLACE|DROP|ALTER)\s/i.test(sinComentarios)
+  ], [1, [PLANTILLA_ASIGNAR_PANADERIA, SQL_DESASIGNAR_PROPIETARIAS], false]);
+  igual('las dos sentencias UPDATE solo se envían desde la asignación y la desasignación',
+    [(sinComentarios.match(/PLANTILLA_ASIGNAR_PANADERIA/g) ?? []).length, (sinComentarios.match(/SQL_DESASIGNAR_PROPIETARIAS/g) ?? []).length], [3, 3]);
   igual('los métodos que escriben son privados (#) y solo crearCuenta, crearPanaderia y crearProducto los invocan',
     [/#insertar\(/.test(sinComentarios), (sinComentarios.match(/this\.#insertar\(/g) ?? []).length, /^\s+(async\s+)?insertar\(/m.test(sinComentarios)], [true, 3, false]);
 };

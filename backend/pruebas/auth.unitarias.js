@@ -1,7 +1,9 @@
-// Pruebas unitarias de las respuestas de error de POST /api/auth/registrar (auth.controller y
-// auth.service). Los rechazos de negocio responden 400 con su mensaje de siempre; cualquier error
-// interno (base de datos, conexión, errores de programación) pasa por responderError y nunca llega
-// al cliente con nombres de bases, tablas, restricciones ni detalles de conexión.
+// Pruebas unitarias de POST /api/auth/registrar (auth.controller y auth.service). Solo un
+// administrador activo con panadería crea cuentas, solo de panadero o gerente y siempre en su
+// propia panadería (el panaderia_id del cuerpo se ignora); crear un administrador es un 403. Los
+// rechazos de negocio responden con su mensaje de siempre; cualquier error interno (base de datos,
+// conexión, errores de programación) pasa por responderError y nunca llega al cliente con nombres
+// de bases, tablas, restricciones ni detalles de conexión.
 // No usan la base de datos ni el servidor: los modelos y bcrypt se sustituyen por dobles en memoria
 // y la respuesta HTTP es un objeto falso. Se pueden ejecutar en cualquier momento.
 //
@@ -39,18 +41,25 @@ const main = async () => {
   const {
     ForeignKeyConstraintError, UniqueConstraintError, ConnectionRefusedError, AccessDeniedError, DatabaseError
   } = require('sequelize');
-  const { Usuario, Panaderia } = require('../src/models/index');
+  const { Usuario } = require('../src/models/index');
   const authController = require('../src/modules/auth/auth.controller');
   const authService = require('../src/modules/auth/auth.service');
   const { ErrorNegocio } = require('../src/utils/errores');
 
   const originales = {
-    panaderiaFindByPk: Panaderia.findByPk, usuarioFindOne: Usuario.findOne, usuarioCreate: Usuario.create,
+    usuarioFindByPk: Usuario.findByPk, usuarioFindOne: Usuario.findOne, usuarioCreate: Usuario.create,
     hash: bcrypt.hash, consolaError: console.error
   };
 
-  // Escenario: la panadería 20 existe y el email EXISTENTE ya está registrado.
-  // fallo = { en: 'panaderia' | 'buscar' | 'crear', error } lanza ese error en ese paso.
+  // Escenario: cuentas que actúan (10: administradora activa de la panadería 20; 11: administradora
+  // desactivada; 12: panadero; 13: administradora sin panadería) y el email EXISTENTE ya registrado.
+  // fallo = { en: 'actor' | 'buscar' | 'crear', error } lanza ese error en ese paso.
+  const ACTORES = {
+    10: { id: 10, rol_id: 1, panaderia_id: 20, estado: true },
+    11: { id: 11, rol_id: 1, panaderia_id: 20, estado: false },
+    12: { id: 12, rol_id: 2, panaderia_id: 20, estado: true },
+    13: { id: 13, rol_id: 1, panaderia_id: null, estado: true }
+  };
   const EXISTENTE = 'existente@pansys.test';
   let eventos;
   let fallo;
@@ -63,10 +72,10 @@ const main = async () => {
     erroresRegistrados = [];
   };
 
-  Panaderia.findByPk = async (id) => {
-    eventos.push(`panaderia:${id}`);
-    if (fallo?.en === 'panaderia') throw fallo.error;
-    return id === 20 ? { id: 20 } : null;
+  Usuario.findByPk = async (id) => {
+    eventos.push(`actor:${id}`);
+    if (fallo?.en === 'actor') throw fallo.error;
+    return ACTORES[id] ? { ...ACTORES[id] } : null;
   };
   Usuario.findOne = async ({ where }) => {
     eventos.push('buscar');
@@ -88,12 +97,13 @@ const main = async () => {
     status(c) { this.codigo = c; return this; },
     json(b) { if (this.codigo === null) this.codigo = 200; this.cuerpo = b; return this; }
   });
-  const registrar = async (body) => {
+  const registrar = async (body, actorId = 10) => {
     const res = respuestaDoble();
-    await authController.registrar({ body }, res);
+    await authController.registrar({ body, usuario: { id: actorId } }, res);
     return res;
   };
 
+  // panaderia_id se envía (como la interfaz actual) pero no se usa: decide la cuenta que actúa
   const VALIDO = { email: 'nueva@pansys.test', contrasena: 'Clave1234', rol_id: 2, panaderia_id: 20 };
   const ERROR_INTERNO = { error: 'Error interno del servidor' };
   const CONFLICTO = {
@@ -119,30 +129,37 @@ const main = async () => {
     }
 
     // ---------- Rechazos de negocio ----------
-    console.log('\n== rechazos de negocio: 400 con el mensaje literal');
+    console.log('\n== rechazos de negocio: código y mensaje literal');
+    const SIN_PERMISO = 'No tiene permisos para realizar esta acción';
     const rechazos = [
-      ['rol inválido', { ...VALIDO, rol_id: 9 }, 'Rol inválido'],
-      ['administrador con panadería', { ...VALIDO, rol_id: 1, panaderia_id: 20 }, 'El administrador general no se asigna a una panadería'],
-      ['panadería inexistente', { ...VALIDO, panaderia_id: 99 }, 'Debe indicar una panadería válida para este rol'],
-      ['panadería no numérica', { ...VALIDO, rol_id: 3, panaderia_id: 'abc' }, 'Debe indicar una panadería válida para este rol'],
-      ['email ya registrado', { ...VALIDO, email: EXISTENTE }, 'El email ya está registrado'],
-      ['email sin formato', { ...VALIDO, email: 'sinarroba' }, 'El email no es válido'],
-      ['contraseña corta', { ...VALIDO, contrasena: 'Ab1' }, 'La contraseña debe tener al menos 8 caracteres']
+      ['rol inválido', { ...VALIDO, rol_id: 9 }, 10, 400, 'Rol inválido'],
+      ['crear un administrador', { ...VALIDO, rol_id: 1 }, 10, 403, 'No tiene permisos para crear administradores'],
+      ['crear un administrador (rol como texto)', { ...VALIDO, rol_id: '1' }, 10, 403, 'No tiene permisos para crear administradores'],
+      ['email ya registrado', { ...VALIDO, email: EXISTENTE }, 10, 400, 'El email ya está registrado'],
+      ['email sin formato', { ...VALIDO, email: 'sinarroba' }, 10, 400, 'El email no es válido'],
+      ['contraseña corta', { ...VALIDO, contrasena: 'Ab1' }, 10, 400, 'La contraseña debe tener al menos 8 caracteres'],
+      ['administradora desactivada', VALIDO, 11, 403, SIN_PERMISO],
+      ['quien actúa es panadero (rol del token desactualizado)', VALIDO, 12, 403, SIN_PERMISO],
+      ['administradora sin panadería asignada', VALIDO, 13, 403, SIN_PERMISO],
+      ['cuenta que actúa inexistente', VALIDO, 99, 403, SIN_PERMISO]
     ];
-    for (const [descripcion, body, mensaje] of rechazos) {
+    for (const [descripcion, body, actorId, codigo, mensaje] of rechazos) {
       preparar();
-      const r = await registrar(body);
-      igual(`${descripcion} -> 400 { error } con el mensaje literal`, [r.codigo, r.cuerpo], [400, { error: mensaje }]);
+      const r = await registrar(body, actorId);
+      igual(`${descripcion} -> ${codigo} { error } con el mensaje literal`, [r.codigo, r.cuerpo], [codigo, { error: mensaje }]);
       igual(`${descripcion}: no crea la cuenta ni se registra como error interno`, [eventos.includes('crear'), erroresRegistrados.length], [false, 0]);
     }
+    preparar();
+    await registrar(VALIDO, 13);
+    igual('quien actúa se comprueba antes que nada (sin buscar el email ni calcular el hash)', eventos, ['actor:13']);
 
-    // Los cuatro rechazos propios del servicio son ErrorNegocio 400 (antes eran Error genéricos)
-    const delServicio = rechazos.filter(([d]) => ['rol inválido', 'administrador con panadería', 'panadería inexistente', 'email ya registrado'].includes(d));
-    for (const [descripcion, { email, contrasena, rol_id, panaderia_id }, mensaje] of delServicio) {
+    // Los rechazos propios del servicio son ErrorNegocio con su código
+    const delServicio = rechazos.filter(([d]) => ['rol inválido', 'crear un administrador', 'email ya registrado', 'administradora sin panadería asignada'].includes(d));
+    for (const [descripcion, { email, contrasena, rol_id }, actorId, codigo, mensaje] of delServicio) {
       preparar();
-      const s = await resultado(authService.registrar(email, contrasena, rol_id, panaderia_id));
-      igual(`servicio, ${descripcion}: ErrorNegocio 400 con el mensaje literal`,
-        [s.ok, s.e instanceof ErrorNegocio, s.e?.status, s.e?.message], [false, true, 400, mensaje]);
+      const s = await resultado(authService.registrar(actorId, email, contrasena, rol_id));
+      igual(`servicio, ${descripcion}: ErrorNegocio ${codigo} con el mensaje literal`,
+        [s.ok, s.e instanceof ErrorNegocio, s.e?.status, s.e?.message], [false, true, codigo, mensaje]);
     }
 
     // ---------- Errores internos ----------
@@ -156,7 +173,7 @@ const main = async () => {
         parent: errorMysql(FK_ROL, { errno: 1452, code: 'ER_NO_REFERENCED_ROW_2', sql: SQL_INSERT }),
         fields: ['rol_id'], table: 'roles', index: 'usuarios_ibfk_3'
       })],
-      ['conexión rechazada (ECONNREFUSED)', 'panaderia', new ConnectionRefusedError(
+      ['conexión rechazada (ECONNREFUSED)', 'actor', new ConnectionRefusedError(
         Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3306'), { code: 'ECONNREFUSED', errno: -4078, address: '127.0.0.1', port: 3306 })
       )],
       ['acceso denegado a MySQL', 'buscar', new AccessDeniedError(
@@ -206,15 +223,17 @@ const main = async () => {
     preparar();
     const panadero = await registrar({ ...VALIDO, email: `  ${VALIDO.email} ` });
     igual('panadero -> 201 { mensaje, id }', [panadero.codigo, panadero.cuerpo], [201, { mensaje: 'Usuario creado exitosamente', id: 77 }]);
-    igual('guarda el email recortado, el hash (no la contraseña), el rol y la panadería',
+    igual('guarda el email recortado, el hash (no la contraseña), el rol y la panadería de quien actúa',
       creado, { email: VALIDO.email, contrasena: 'hash-doble', rol_id: 2, panaderia_id: 20 });
-    igual('orden: panadería, email repetido, hash, creación', eventos, ['panaderia:20', 'buscar', 'hash:10', 'crear']);
+    igual('orden: cuenta que actúa, email repetido, hash, creación', eventos, ['actor:10', 'buscar', 'hash:10', 'crear']);
 
-    preparar();
-    const admin = await registrar({ email: 'admin.nuevo@pansys.test', contrasena: 'Clave1234', rol_id: 1 });
-    igual('administrador sin panadería -> 201', [admin.codigo, admin.cuerpo], [201, { mensaje: 'Usuario creado exitosamente', id: 77 }]);
-    igual('administrador: panaderia_id nulo y sin consultar panaderías',
-      [creado?.panaderia_id, eventos.some(e => e.startsWith('panaderia:'))], [null, false]);
+    // El panaderia_id del cuerpo no decide nada: otra panadería, texto, nulo o ausente
+    for (const [descripcion, panaderia] of [['otra panadería', 21], ['texto', 'abc'], ['nulo', null], ['ausente', undefined]]) {
+      preparar();
+      const gerente = await registrar({ email: 'gerente.nuevo@pansys.test', contrasena: 'Clave1234', rol_id: 3, panaderia_id: panaderia });
+      igual(`gerente con panaderia_id ${descripcion} en el cuerpo -> 201 en la panadería de quien actúa`,
+        [gerente.codigo, creado?.rol_id, creado?.panaderia_id], [201, 3, 20]);
+    }
     igual('registros correctos: ningún error interno registrado', erroresRegistrados.length, 0);
 
     // ---------- Código fuente ----------
@@ -225,8 +244,9 @@ const main = async () => {
     igual('auth.controller.js no devuelve error.message al cliente', /error\.message/.test(controlador), false);
     igual('auth.controller.js: los tres catch usan responderError', (controlador.match(/responderError\(res, error\)/g) ?? []).length, 3);
     igual('auth.service.js no lanza Error genéricos (solo ErrorNegocio)', /new Error\(/.test(servicio), false);
+    igual('auth.controller.js no lee panaderia_id del cuerpo', /panaderia_id/.test(controlador), false);
   } finally {
-    Panaderia.findByPk = originales.panaderiaFindByPk;
+    Usuario.findByPk = originales.usuarioFindByPk;
     Usuario.findOne = originales.usuarioFindOne;
     Usuario.create = originales.usuarioCreate;
     bcrypt.hash = originales.hash;

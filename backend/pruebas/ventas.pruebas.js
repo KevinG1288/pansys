@@ -4,7 +4,9 @@
 // Aislamiento (pruebas/aislamiento.js): se ejecuta SOLO contra pansys_test, con el bloqueo de
 // suite durante toda la ejecución. Crea una cuenta administradora temporal activa (propietaria),
 // dos panaderías temporales A y B, una cuenta panadera en cada una y una gerente en A; todo ocurre
-// en esas panaderías. El producto inactivo se crea con ejecucion.crearProducto(). Al terminar,
+// en esas panaderías. Un administrador gestiona solo su panadería: la administradora se crea sin
+// panadería (las panaderías necesitan antes su propietaria) y se le asigna A con
+// ejecucion.asignarPanaderia(). El producto inactivo se crea con ejecucion.crearProducto(). Al terminar,
 // ejecucion.limpiar() borra solo lo registrado por esta ejecución (una vez, sin reintentos). No hay
 // ningún borrado ni ninguna escritura directa propia en esta suite.
 //
@@ -162,10 +164,12 @@ const main = async () => {
   // iniciarEjecucion comprueba DB_NAME, la conexión dedicada y la de Sequelize, y toma el bloqueo
   ejecucion = await iniciarEjecucion({ suite: 'ventas', sequelize });
   console.log(`      runId de esta ejecución: ${ejecucion.runId} (filas marcadas con "prueba.ventas.${ejecucion.runId}." y "PRUEBA ${ejecucion.runId}")`);
-  // Administradora ACTIVA: la venta del administrador necesita una cuenta administradora válida
+  // Administradora ACTIVA: la venta del administrador necesita una cuenta administradora válida.
+  // Es propietaria de A y B y se le asigna A: es la administradora de A (y solo opera en A).
   cuentas.admin = await ejecucion.crearCuenta({ etiqueta: 'admin', rol: 'administrador', activa: true });
   panaderiaA = await ejecucion.crearPanaderia({ etiqueta: 'A', propietariaId: cuentas.admin });
   panaderiaB = await ejecucion.crearPanaderia({ etiqueta: 'B', propietariaId: cuentas.admin });
+  await ejecucion.asignarPanaderia({ cuentaId: cuentas.admin, panaderiaId: panaderiaA });
   cuentas.panaderoa = await ejecucion.crearCuenta({ etiqueta: 'panaderoa', rol: 'panadero', panaderiaId: panaderiaA, activa: true });
   cuentas.panaderob = await ejecucion.crearCuenta({ etiqueta: 'panaderob', rol: 'panadero', panaderiaId: panaderiaB, activa: true });
   cuentas.gerentea = await ejecucion.crearCuenta({ etiqueta: 'gerentea', rol: 'gerente', panaderiaId: panaderiaA, activa: true });
@@ -178,7 +182,7 @@ const main = async () => {
   const firmar = (id, etiqueta, rol, rolId, panaderiaId) => jwt.sign({
     id, email: ejecucion.correo(etiqueta), rol, rol_id: rolId, panaderia_id: panaderiaId, version_sesion: 0
   }, process.env.JWT_SECRET, { expiresIn: '10m' });
-  TOKENS.admin = firmar(cuentas.admin, 'admin', 'administrador', 1, null);
+  TOKENS.admin = firmar(cuentas.admin, 'admin', 'administrador', 1, panaderiaA);
   TOKENS.panaderoa = firmar(cuentas.panaderoa, 'panaderoa', 'panadero', 2, panaderiaA);
   TOKENS.panaderob = firmar(cuentas.panaderob, 'panaderob', 'panadero', 2, panaderiaB);
   TOKENS.gerentea = firmar(cuentas.gerentea, 'gerentea', 'gerente', 3, panaderiaA);
@@ -249,10 +253,17 @@ const main = async () => {
   await esperar('producto inactivo -> 404', 404, 'POST', '/api/ventas', 'panaderoa', { productos: [{ producto_id: inactivoId, cantidad: 1 }] });
   igual('el producto inactivo conserva su stock', await stock(inactivoId), 50);
   await esperar('gerente vende -> 403', 403, 'POST', '/api/ventas', 'gerentea', { productos: [{ producto_id: pan?.id, cantidad: 1 }] });
-  const ventaAdmin = await esperar('admin vende indicando panaderia_id en el body (como el frontend)', 201, 'POST', '/api/ventas', 'admin',
-    { panaderia_id: panaderiaA, empleado_id: 99, productos: [{ producto_id: pan?.id, cantidad: 1 }] });
+  // La administradora de A no vende productos de B, aunque indique B en el cuerpo
+  const ventasAntesAdmin = await contarVentas();
+  await esperar('admin de A vende producto de B (indicando panaderia_id de B) -> 404', 404, 'POST', '/api/ventas', 'admin',
+    { panaderia_id: panaderiaB, productos: [{ producto_id: panB?.id, cantidad: 1 }] });
+  igual('el rechazo no crea ninguna venta ni descuenta el producto de B', [await contarVentas(), await stock(panB?.id)], [ventasAntesAdmin, 5]);
+  // El panaderia_id del cliente no decide la panadería: la venta queda en la de la administradora (A)
+  const ventaAdmin = await esperar('admin de A vende indicando panaderia_id de B en el body -> 201 en A', 201, 'POST', '/api/ventas', 'admin',
+    { panaderia_id: panaderiaB, empleado_id: 99, productos: [{ producto_id: pan?.id, cantidad: 1 }] });
   igual('empleado = usuario del token (se ignora empleado_id del cliente)', ventaAdmin?.empleado_id, cuentas.admin);
-  igual('la venta del administrador queda en la panadería indicada', ventaAdmin?.panaderia_id, panaderiaA);
+  igual('la venta del administrador queda en su panadería (A), no en la indicada', ventaAdmin?.panaderia_id, panaderiaA);
+  igual('se registró exactamente una venta', await contarVentas(), ventasAntesAdmin + 1);
   igual('pan queda en 6', await stock(pan?.id), 6);
 
   // ---------- Integración con Producción ----------

@@ -4,7 +4,9 @@
 // Aislamiento (pruebas/aislamiento.js): se ejecuta SOLO contra pansys_test, con el bloqueo de
 // suite durante toda la ejecución. Crea una cuenta administradora temporal activa (propietaria),
 // dos panaderías temporales A y B, una cuenta panadera en cada una y una gerente en A; todo ocurre
-// en esas panaderías. Al terminar, ejecucion.limpiar() borra solo lo registrado por esta ejecución
+// en esas panaderías. Un administrador gestiona solo su panadería: la administradora se crea sin
+// panadería (las panaderías necesitan antes su propietaria) y se le asigna A con
+// ejecucion.asignarPanaderia(). Al terminar, ejecucion.limpiar() borra solo lo registrado por esta ejecución
 // (una vez, sin reintentos). No hay ningún borrado ni ninguna escritura directa propia en esta suite.
 //
 // El caso de una materia prima con precio negativo (dato heredado que la API ya no permite crear)
@@ -197,10 +199,12 @@ const main = async () => {
   // iniciarEjecucion comprueba DB_NAME, la conexión dedicada y la de Sequelize, y toma el bloqueo
   ejecucion = await iniciarEjecucion({ suite: 'produccion', sequelize });
   console.log(`      runId de esta ejecución: ${ejecucion.runId} (filas marcadas con "prueba.produccion.${ejecucion.runId}." y "PRUEBA ${ejecucion.runId}")`);
-  // Administradora ACTIVA: el administrador consulta y edita recetas de una panadería concreta
+  // Administradora ACTIVA: el administrador consulta y edita recetas de su panadería.
+  // Es propietaria de A y B y se le asigna A: es la administradora de A (y solo opera en A).
   cuentas.admin = await ejecucion.crearCuenta({ etiqueta: 'admin', rol: 'administrador', activa: true });
   panaderiaA = await ejecucion.crearPanaderia({ etiqueta: 'A', propietariaId: cuentas.admin });
   panaderiaB = await ejecucion.crearPanaderia({ etiqueta: 'B', propietariaId: cuentas.admin });
+  await ejecucion.asignarPanaderia({ cuentaId: cuentas.admin, panaderiaId: panaderiaA });
   cuentas.panaderoa = await ejecucion.crearCuenta({ etiqueta: 'panaderoa', rol: 'panadero', panaderiaId: panaderiaA, activa: true });
   cuentas.panaderob = await ejecucion.crearCuenta({ etiqueta: 'panaderob', rol: 'panadero', panaderiaId: panaderiaB, activa: true });
   cuentas.gerentea = await ejecucion.crearCuenta({ etiqueta: 'gerentea', rol: 'gerente', panaderiaId: panaderiaA, activa: true });
@@ -209,7 +213,7 @@ const main = async () => {
   const firmar = (id, etiqueta, rol, rolId, panaderiaId) => jwt.sign({
     id, email: ejecucion.correo(etiqueta), rol, rol_id: rolId, panaderia_id: panaderiaId, version_sesion: 0
   }, process.env.JWT_SECRET, { expiresIn: '10m' });
-  TOKENS.admin = firmar(cuentas.admin, 'admin', 'administrador', 1, null);
+  TOKENS.admin = firmar(cuentas.admin, 'admin', 'administrador', 1, panaderiaA);
   TOKENS.panaderoa = firmar(cuentas.panaderoa, 'panaderoa', 'panadero', 2, panaderiaA);
   TOKENS.panaderob = firmar(cuentas.panaderob, 'panaderob', 'panadero', 2, panaderiaB);
   TOKENS.gerentea = firmar(cuentas.gerentea, 'gerentea', 'gerente', 3, panaderiaA);
@@ -255,12 +259,34 @@ const main = async () => {
   await esperar('panadero de A crea receta en producto de B -> 404', 404, 'POST', `${P}/recetas/${panB?.id}`, 'panaderoa', recetaPan);
   await esperar('receta con insumo de otra panadería -> 404', 404, 'PUT', `${P}/recetas/${pan?.id}`, 'panaderoa',
     { insumos: [{ materia_prima_id: harinaB?.id, cantidad_por_unidad: 1 }] });
-  await esperar('admin mezcla panadería (pide B para producto de A) -> 404', 404, 'PUT',
+  // La administradora opera en A aunque pida B en la query: ?panaderia_id del cliente se ignora
+  const recetaAdmin = await esperar('admin de A con ?panaderia_id=B actualiza receta de A -> 200 (en A)', 200, 'PUT',
     `${P}/recetas/${pan?.id}?panaderia_id=${panaderiaB}`, 'admin', recetaPan);
+  igual('la receta actualizada por el admin es la de A, con sus 3 insumos', [recetaAdmin?.panaderia_id, recetaAdmin?.insumos?.length], [panaderiaA, 3]);
   await esperar('PUT receta inexistente -> 404', 404, 'PUT', `${P}/recetas/${panSinReceta?.id}`, 'panaderoa', recetaPan);
   await esperar('DELETE receta inexistente -> 404', 404, 'DELETE', `${P}/recetas/${panSinReceta?.id}`, 'panaderoa');
   const recetasA = await esperar('admin lista recetas de A', 200, 'GET', `${P}/recetas?panaderia_id=${panaderiaA}`, 'admin');
   igual('el listado de A solo contiene productos de A', Array.isArray(recetasA) && recetasA.every(r => r.panaderia_id === panaderiaA), true);
+
+  // La administradora de A no accede a productos ni recetas de B, aunque indique B
+  const recetaB = { insumos: [{ materia_prima_id: harinaB?.id, cantidad_por_unidad: 1 }] };
+  await esperar('panadero de B crea receta en su producto', 201, 'POST', `${P}/recetas/${panB?.id}`, 'panaderob', recetaB);
+  const recetasPidiendoB = await esperar('admin de A lista recetas con ?panaderia_id=B -> 200 (en A)', 200, 'GET', `${P}/recetas?panaderia_id=${panaderiaB}`, 'admin');
+  igual('el listado pedido con B solo contiene productos de A (no el de B)', Array.isArray(recetasPidiendoB) && recetasPidiendoB.length > 0 &&
+    recetasPidiendoB.every(r => r.panaderia_id === panaderiaA) && !recetasPidiendoB.some(r => r.producto_id === panB?.id), true);
+  const productosPidiendoB = await esperar('admin de A lista productos con ?panaderia_id=B -> 200 (en A)', 200, 'GET', `/api/ventas/productos?panaderia_id=${panaderiaB}`, 'admin');
+  igual('el listado de productos pedido con B solo contiene productos de A (no el de B)', Array.isArray(productosPidiendoB) && productosPidiendoB.length > 0 &&
+    productosPidiendoB.every(p => p.panaderia_id === panaderiaA) && !productosPidiendoB.some(p => p.id === panB?.id), true);
+  await esperar('admin de A consulta receta de B (?panaderia_id=B) -> 404', 404, 'GET', `${P}/recetas/${panB?.id}?panaderia_id=${panaderiaB}`, 'admin');
+  await esperar('admin de A edita receta de B (?panaderia_id=B) -> 404', 404, 'PUT', `${P}/recetas/${panB?.id}?panaderia_id=${panaderiaB}`, 'admin', recetaB);
+  await esperar('admin de A elimina receta de B (?panaderia_id=B) -> 404', 404, 'DELETE', `${P}/recetas/${panB?.id}?panaderia_id=${panaderiaB}`, 'admin');
+  await esperar('admin de A calcula con producto de B (&panaderia_id=B) -> 404', 404, 'GET',
+    `${P}/calcular?producto_id=${panB?.id}&cantidad=1&panaderia_id=${panaderiaB}`, 'admin');
+  await esperar('admin de A crea orden con producto de B (?panaderia_id=B) -> 404', 404, 'POST', `${P}/ordenes?panaderia_id=${panaderiaB}`, 'admin',
+    { producto_id: panB?.id, cantidad_planificada: 1, panaderia_id: panaderiaB });
+  const recetaBIntacta = await esperar('panadero de B sigue viendo su receta', 200, 'GET', `${P}/recetas/${panB?.id}`, 'panaderob');
+  igual('receta de B intacta y stock de B sin descontar',
+    [recetaBIntacta?.insumos?.map(i => [i.materia_prima_id, i.cantidad_por_unidad]), await stock(harinaB?.id)], [[[harinaB?.id, 1]], 20]);
   await esperar('receta de levadura', 201, 'POST', `${P}/recetas/${panLevadura?.id}`, 'panaderoa',
     { insumos: [{ materia_prima_id: levadura?.id, cantidad_por_unidad: '0.125' }] });
 

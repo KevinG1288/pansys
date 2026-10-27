@@ -22,13 +22,14 @@ class AuthController {
 
   async registrar(req, res) {
     try {
-      const { email, contrasena, rol_id, panaderia_id } = req.body ?? {};
+      // La panadería no se lee del cuerpo: es siempre la del administrador autenticado
+      const { email, contrasena, rol_id } = req.body ?? {};
 
       if (!email || !contrasena || !rol_id) {
         return res.status(400).json({ error: 'Todos los campos son requeridos' });
       }
 
-      const resultado = await authService.registrar(email, contrasena, rol_id, panaderia_id);
+      const resultado = await authService.registrar(req.usuario.id, email, contrasena, rol_id);
       res.status(201).json(resultado);
 
     } catch (error) {

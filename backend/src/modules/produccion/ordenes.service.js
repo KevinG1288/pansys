@@ -7,7 +7,7 @@ const { enTransaccion } = require('../../utils/transaccion');
 const recetasService = require('./recetas.service');
 const {
   ESTADOS_ORDEN, MAX_CANTIDAD_ORDEN, MAX_UNIDADES, aUnidades, deUnidades, aDecimal4, centavosATexto,
-  parsearId, parsearEntero, parsearCantidad, parsearTexto, parsearFecha, fechaHoy
+  parsearId, exigirPanaderiaId, parsearEntero, parsearCantidad, parsearTexto, parsearFecha, fechaHoy
 } = require('./produccion.validaciones');
 
 // Detalle completo de una orden (los insumos guardan su copia histórica)
@@ -18,8 +18,8 @@ const INCLUDE_DETALLE = [
   { model: InsumoUsado, as: 'insumos', include: [{ model: MateriaPrima, attributes: ['id', 'nombre'] }] }
 ];
 
-// panaderiaId null = administrador sin panadería indicada
-const condicionPorId = (id, panaderiaId) => (panaderiaId ? { id, panaderia_id: panaderiaId } : { id });
+// Siempre limitada a la panadería autorizada: una orden de otra panadería no se encuentra (404)
+const condicionPorId = (id, panaderiaId) => ({ id, panaderia_id: exigirPanaderiaId(panaderiaId) });
 
 // Valida el detalle opcional de devoluciones (antes de abrir la transacción)
 const validarDevoluciones = (insumos) => {
@@ -149,7 +149,7 @@ class OrdenesService {
       return { ordenId: orden.id, materiaIds: necesidades.map(n => n.materia_prima_id) };
     });
 
-    const orden = await this.obtener(ordenId, null);
+    const orden = await this.obtener(ordenId, panaderiaId);
     const alertas_stock_bajo = await this.alertasStockBajo(materiaIds);
     return { orden, alertas_stock_bajo };
   }
@@ -243,7 +243,7 @@ class OrdenesService {
       }, t);
     });
 
-    return this.obtener(ordenId, null);
+    return this.obtener(ordenId, panaderiaId);
   }
 
   // Fase A: valida todas las devoluciones sin escribir. Fase B: aplica los cambios.
@@ -339,7 +339,7 @@ class OrdenesService {
       }, t);
     });
 
-    return this.obtener(ordenId, null);
+    return this.obtener(ordenId, panaderiaId);
   }
 }
 

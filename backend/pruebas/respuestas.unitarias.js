@@ -1,5 +1,6 @@
 // Pruebas unitarias de las respuestas de error de Inventario, Ventas (consultas y creación de
-// productos) y del middleware resolverPanaderia. Los errores de negocio conservan su código y su
+// productos) y del middleware resolverPanaderia (siempre la panadería de la cuenta autenticada,
+// para todos los roles). Los errores de negocio conservan su código y su
 // mensaje; un dato inválido enviado por el cliente es un 400 que solo nombra campos del cliente; y
 // cualquier error interno (base de datos, conexión, errores de programación) es un 500 genérico que
 // nunca llega al cliente con SQL, nombres de bases, tablas, restricciones ni detalles de Sequelize.
@@ -145,7 +146,8 @@ const main = async () => {
     return { codigo: res.codigo, cuerpo: res.cuerpo, siguio, panaderiaId: peticion.panaderiaId };
   };
   const PANADERO = { id: 11, rol_id: 2, panaderia_id: 20 };
-  const ADMIN = { id: 10, rol_id: 1, panaderia_id: null };
+  const ADMIN = { id: 10, rol_id: 1, panaderia_id: 20 };
+  const ADMIN_SIN_PANADERIA = { id: 13, rol_id: 1, panaderia_id: null };
 
   const ERROR_INTERNO = { error: 'Error interno del servidor' };
   const CONFLICTO = {
@@ -173,9 +175,9 @@ const main = async () => {
     ['error de programación (TypeError)', new TypeError("Cannot read properties of undefined (reading 'id')")]
   ];
 
-  // Los nueve puntos, más resolverPanaderia: cómo se invoca cada uno y en qué paso fallaría
+  // Los nueve puntos: cómo se invoca cada uno y en qué paso fallaría (resolverPanaderia ya no
+  // consulta la base: no tiene errores internos que probar)
   const puntos = [
-    ['resolverPanaderia', 'panaderia', async () => middleware(undefined, { usuario: ADMIN, query: { panaderia_id: '20' } })],
     ['GET /api/ventas', 'listarVentas', () => llamar(ventasController.getAll, {})],
     ['GET /api/ventas/productos', 'listarProductos', () => llamar(ventasController.getProductos, {})],
     ['POST /api/ventas/productos', 'crearProducto', () => llamar(ventasController.crearProducto, { body: { nombre: 'Torta', precio_venta: 900 } })],
@@ -214,8 +216,13 @@ const main = async () => {
     r = await llamar(inventarioController.getById, { params: { id: '30' } });
     igual('GET /api/inventario/:id -> 200 con la materia prima', [r.codigo, r.cuerpo], [200, MATERIAS[0]]);
     preparar();
+    r = await llamar(inventarioController.getById, { params: { id: '30' }, panaderiaId: 21 });
+    igual('GET /api/inventario/:id de otra panadería -> 404 (no se busca sin filtro de panadería)', [r.codigo, r.cuerpo], [404, NO_ENCONTRADA]);
+    preparar();
     r = await llamar(inventarioController.getById, { params: { id: '30' }, panaderiaId: null });
-    igual('GET /api/inventario/:id como administrador sin panadería -> 200', r.codigo, 200);
+    igual('GET /api/inventario/:id sin panadería autorizada -> 500 genérico, sin ninguna consulta',
+      [r.codigo, r.cuerpo, eventos], [500, ERROR_INTERNO, []]);
+    preparar();
     preparar();
     r = await llamar(inventarioController.crear, {
       body: { nombre: 'Levadura', unidad_medida: 'g', cantidad_disponible: '1.2345', stock_minimo: 0, precio_unitario: 10, panaderia_id: 99, estado: false }
@@ -238,28 +245,40 @@ const main = async () => {
     igual('panadero: usa la panadería del token e ignora la del cliente, sin consultar',
       [m.siguio, m.panaderiaId, m.codigo, eventos], [true, 20, null, []]);
     preparar();
+    m = await middleware(undefined, { usuario: { id: 12, rol_id: 3, panaderia_id: 20 }, body: { panaderia_id: 21 } });
+    igual('gerente: usa la panadería de su cuenta e ignora la del cuerpo', [m.siguio, m.panaderiaId, m.codigo], [true, 20, null]);
+    preparar();
     m = await middleware(undefined, { usuario: { id: 12, rol_id: 3, panaderia_id: null } });
     igual('gerente sin panadería -> 403', [m.codigo, m.cuerpo, m.siguio], [403, { error: 'El usuario no tiene una panadería asignada' }, false]);
-    preparar();
-    m = await middleware(undefined, { usuario: ADMIN });
-    igual('administrador sin panaderia_id (requerida) -> 400', [m.codigo, m.cuerpo, m.siguio], [400, { error: 'panaderia_id es requerido' }, false]);
-    preparar();
-    m = await middleware({ requerida: false }, { usuario: ADMIN, query: { panaderia_id: '' } });
-    igual('administrador sin panaderia_id (opcional) -> sigue con null', [m.siguio, m.panaderiaId, m.codigo], [true, null, null]);
-    for (const valor of ['abc', '0', '-3', '1.5']) {
+    for (const [descripcion, req] of [
+      ['en la query', { query: { panaderia_id: '21' } }],
+      ['en el cuerpo', { body: { panaderia_id: 21 } }],
+      ['en la query y en el cuerpo', { query: { panaderia_id: '99' }, body: { panaderia_id: 21 } }],
+      ['sin indicarla', {}]
+    ]) {
       preparar();
-      m = await middleware(undefined, { usuario: ADMIN, query: { panaderia_id: valor } });
-      igual(`administrador con panaderia_id "${valor}" -> 400 sin consultar`, [m.codigo, m.cuerpo, m.siguio, eventos], [400, { error: 'panaderia_id inválido' }, false, []]);
+      m = await middleware(undefined, { usuario: ADMIN, ...req });
+      igual(`administrador con panadería, otra panadería ${descripcion} -> sigue con la suya, sin consultar`,
+        [m.siguio, m.panaderiaId, m.codigo, eventos], [true, 20, null, []]);
+    }
+    for (const [descripcion, req] of [
+      ['sin indicar panadería', {}],
+      ['con panadería en la query', { query: { panaderia_id: '20' } }],
+      ['con panadería en el cuerpo', { body: { panaderia_id: 20 } }]
+    ]) {
+      preparar();
+      m = await middleware(undefined, { usuario: ADMIN_SIN_PANADERIA, ...req });
+      igual(`administrador sin panadería asignada, ${descripcion} -> 403 sin consultar`,
+        [m.codigo, m.cuerpo, m.siguio, eventos], [403, { error: 'El usuario no tiene una panadería asignada' }, false, []]);
+    }
+    for (const valor of ['20', 0, -3, 1.5, undefined]) {
+      preparar();
+      m = await middleware(undefined, { usuario: { id: 14, rol_id: 2, panaderia_id: valor } });
+      igual(`panadería de la cuenta no válida (${JSON.stringify(valor) ?? 'undefined'}) -> 403`, [m.codigo, m.siguio], [403, false]);
     }
     preparar();
-    m = await middleware(undefined, { usuario: ADMIN, query: { panaderia_id: '99' } });
-    igual('administrador con panadería inexistente -> 404', [m.codigo, m.cuerpo, m.siguio], [404, { error: 'Panadería no encontrada' }, false]);
-    preparar();
-    m = await middleware(undefined, { usuario: ADMIN, query: { panaderia_id: '20' } });
-    igual('administrador con panadería en la query -> sigue con su id', [m.siguio, m.panaderiaId, eventos], [true, 20, ['panaderia:20']]);
-    preparar();
-    m = await middleware(undefined, { usuario: ADMIN, body: { panaderia_id: 20 } });
-    igual('administrador con panadería en el cuerpo -> sigue con su id', [m.siguio, m.panaderiaId], [true, 20]);
+    m = await middleware(undefined, {});
+    igual('sin cuenta autenticada en la petición -> 403, sin excepción', [m.codigo, m.siguio], [403, false]);
 
     // ---------- Errores internos en los diez puntos ----------
     console.log('\n== errores internos: 500 genérico, sin filtraciones, con registro en el servidor');
@@ -420,8 +439,10 @@ const main = async () => {
     // ---------- Código fuente ----------
     console.log('\n== código fuente');
     const leer = (relativa) => fs.readFileSync(path.join(__dirname, relativa), 'utf8');
+    const middlewareCodigo = leer('../src/middlewares/roles.middleware.js');
+    igual('roles.middleware.js no devuelve error.message, no lee la query ni el cuerpo y no consulta modelos',
+      [/error\.message/.test(middlewareCodigo), /req\.(query|body)/.test(middlewareCodigo), /require\(/.test(middlewareCodigo)], [false, false, false]);
     for (const [archivo, usos] of [
-      ['../src/middlewares/roles.middleware.js', 1],
       ['../src/modules/ventas/ventas.controller.js', 4],
       ['../src/modules/inventario/inventario.controller.js', 6]
     ]) {

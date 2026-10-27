@@ -1,6 +1,6 @@
 const { MateriaPrima } = require('../../models/index');
 const { ErrorNegocio } = require('../../utils/errores');
-const { parsearCantidad, deUnidades } = require('../produccion/produccion.validaciones');
+const { parsearCantidad, deUnidades, exigirPanaderiaId } = require('../produccion/produccion.validaciones');
 
 // Campos que el cliente puede enviar al crear o editar (panaderia_id y estado los fija el servidor)
 const CAMPOS_EDITABLES = ['nombre', 'unidad_medida', 'cantidad_disponible', 'stock_minimo', 'precio_unitario'];
@@ -18,9 +18,8 @@ const filtrarCampos = (datos = {}) => {
   return campos;
 };
 
-// panaderiaId null = administrador sin panadería indicada (acceso a cualquier registro)
-const condicionPorId = (id, panaderiaId) =>
-  panaderiaId ? { id, panaderia_id: panaderiaId } : { id };
+// Siempre limitada a la panadería autorizada: un registro de otra panadería no se encuentra
+const condicionPorId = (id, panaderiaId) => ({ id, panaderia_id: exigirPanaderiaId(panaderiaId) });
 
 class InventarioService {
 

@@ -94,6 +94,7 @@ const ejecucionFalsa = (suite) => ({
   nombre: (texto) => `PRUEBA ${RUN_ID} ${texto}`,
   crearCuenta: async () => { anotar('ejecucion:crearCuenta'); fallarSi('crearCuenta'); return ++siguienteId; },
   crearPanaderia: async () => { anotar('ejecucion:crearPanaderia'); return ++siguienteId; },
+  asignarPanaderia: async ({ cuentaId } = {}) => { anotar('ejecucion:asignarPanaderia'); return cuentaId; },
   crearProducto: async () => { anotar('ejecucion:crearProducto'); return ++siguienteId; },
   registrar: (tipo, id) => { anotar('ejecucion:registrar'); return id; },
   ids: () => [],

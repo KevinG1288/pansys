@@ -5,16 +5,19 @@
 // suite durante toda la ejecución. Todas las cuentas sobre las que actúa son temporales de esta
 // ejecución (correo "prueba.usuarios.<runId>.<etiqueta>@pansys.test"); nunca usa ni modifica las
 // cuentas de la semilla ni otras cuentas existentes. Las panaderías A y B también son temporales.
+// Cada administrador pertenece a una panadería y solo gestiona sus cuentas: la administradora
+// principal se crea sin panadería (las panaderías necesitan antes su propietaria), es propietaria
+// de A y B y se le asigna A con ejecucion.asignarPanaderia(); hay además una administradora de B.
 //  - Cuentas sin contraseña utilizable: ejecucion.crearCuenta() (escritura protegida del módulo).
 //  - Cuentas que deben iniciar sesión: POST /api/auth/registrar con un correo marcado; su id se
 //    registra con ejecucion.registrar() en cuanto la API lo devuelve.
 // Al terminar, ejecucion.limpiar() borra solo lo registrado por esta ejecución (una vez, sin
 // reintentos). Todo cambio de correo conserva la marca, para que la limpieza lo reconozca.
 //
-// La regla "debe quedar al menos un administrador activo" (409) no se alcanza por la API cuando
-// hay otro administrador actuando: se prueba en pruebas/usuarios.unitarias.js sobre el servicio. Aquí
-// se prueba la serialización real (FOR UPDATE) entre dos administradores temporales, contando solo
-// esas dos cuentas.
+// La regla "debe quedar al menos un administrador activo" en la panadería (409) no se alcanza por la
+// API cuando hay otro administrador actuando: se prueba en pruebas/usuarios.unitarias.js sobre el
+// servicio. Aquí se prueba la serialización real (FOR UPDATE) entre dos administradores temporales
+// de la misma panadería (A), contando solo esas dos cuentas.
 //
 // El servidor de la API arranca en un puerto asignado por el sistema (PORT=0) y la suite obtiene
 // su dirección real; antes de enviar ningún token comprueba que responde con el runId propio.
@@ -227,11 +230,13 @@ const main = async () => {
   // iniciarEjecucion comprueba DB_NAME, la conexión dedicada y la de Sequelize, y toma el bloqueo
   ejecucion = await iniciarEjecucion({ suite: 'usuarios', sequelize });
   console.log(`      runId de esta ejecución: ${ejecucion.runId} (filas marcadas con "prueba.usuarios.${ejecucion.runId}." y "PRUEBA ${ejecucion.runId}")`);
-  // Administradora ACTIVA que actúa en casi todas las pruebas y es propietaria de A y B
+  // Administradora ACTIVA que actúa en casi todas las pruebas: propietaria de A y B y asignada a A
+  // (es la administradora de A y solo gestiona las cuentas de A)
   cuentas.admin = await ejecucion.crearCuenta({ etiqueta: 'admin', rol: 'administrador', activa: true });
   panaderiaA = await ejecucion.crearPanaderia({ etiqueta: 'A', propietariaId: cuentas.admin });
   panaderiaB = await ejecucion.crearPanaderia({ etiqueta: 'B', propietariaId: cuentas.admin });
-  TOKENS.admin = firmar(cuentas.admin, 'admin', 'administrador', 1, null);
+  await ejecucion.asignarPanaderia({ cuentaId: cuentas.admin, panaderiaId: panaderiaA });
+  TOKENS.admin = firmar(cuentas.admin, 'admin', 'administrador', 1, panaderiaA);
 
   // Cuentas de los distintos bloques (cada bloque usa las suyas: ninguno depende de cómo dejó otro las cuentas)
   await cuentaConToken('mwpanadero', 'panadero', 2, panaderiaA);
@@ -239,10 +244,13 @@ const main = async () => {
   await cuentaConToken('panaderoa', 'panadero', 2, panaderiaA);
   await cuentaConToken('gerentea', 'gerente', 3, panaderiaA);
   await cuentaConToken('objetivo', 'panadero', 2, panaderiaB);
-  await cuentaConToken('admina', 'administrador', 1, null);
-  await cuentaConToken('adminb', 'administrador', 1, null);
-  await cuentaConToken('admine', 'administrador', 1, null);
-  await cuentaConToken('adminf', 'administrador', 1, null);
+  // Administradora de B: para las pruebas de acceso cruzado entre administradores de A y B
+  await cuentaConToken('adminotra', 'administrador', 1, panaderiaB);
+  // Parejas de la prueba concurrente: administradoras de la misma panadería (A)
+  await cuentaConToken('admina', 'administrador', 1, panaderiaA);
+  await cuentaConToken('adminb', 'administrador', 1, panaderiaA);
+  await cuentaConToken('admine', 'administrador', 1, panaderiaA);
+  await cuentaConToken('adminf', 'administrador', 1, panaderiaA);
   await cuentaConToken('edpan', 'panadero', 2, panaderiaA);
   await cuentaConToken('edvecino', 'panadero', 2, panaderiaB);
   await cuentaConToken('edger', 'gerente', 3, panaderiaA);
@@ -251,7 +259,7 @@ const main = async () => {
   await cuentaConToken('perpan', 'panadero', 2, panaderiaA);
   await cuentaConToken('perpanb', 'panadero', 2, panaderiaB);
   await cuentaConToken('perger', 'gerente', 3, panaderiaA);
-  await cuentaConToken('perascenso', 'panadero', 2, panaderiaB);
+  await cuentaConToken('perascenso', 'panadero', 2, panaderiaA);
   await cuentaConToken('sinversion', 'panadero', 2, panaderiaB);
 
   // Tokens especiales, todos de cuentas temporales
@@ -337,14 +345,41 @@ const main = async () => {
   igual('campos expuestos de una cuenta', p1 && Object.keys(p1).sort(),
     ['createdAt', 'email', 'estado', 'id', 'panaderia', 'panaderia_id', 'rol', 'rol_id', 'updatedAt']);
   igual('rol y panadería legibles', [p1?.rol, p1?.panaderia], ['panadero', { id: panaderiaA, nombre: ejecucion.nombre('A') }]);
-  igual('administrador sin panadería', lista?.find(u => u.id === cuentas.admin)?.panaderia, null);
+  igual('el administrador pertenece a su panadería (A)', lista?.find(u => u.id === cuentas.admin)?.panaderia, { id: panaderiaA, nombre: ejecucion.nombre('A') });
+  igual('el listado solo contiene cuentas de A (ninguna de B, tampoco su administradora)',
+    [Array.isArray(lista) && lista.every(u => u.panaderia_id === panaderiaA), [cuentas.objetivo, cuentas.mwvecino, cuentas.adminotra].some(id => lista?.some(u => u.id === id))],
+    [true, false]);
   igual('el listado no contiene contraseñas ni hashes', sinSecretos(lista), true);
   const panaderias = await esperar('admin: GET /api/panaderias -> 200', 200, 'GET', '/api/panaderias', 'admin');
-  igual('incluye las panaderías temporales con campos mínimos (id y nombre)',
-    [panaderiaA, panaderiaB].map(id => panaderias?.find(p => p.id === id)),
-    [{ id: panaderiaA, nombre: ejecucion.nombre('A') }, { id: panaderiaB, nombre: ejecucion.nombre('B') }]);
+  igual('solo su panadería (A), con campos mínimos (id y nombre)', panaderias, [{ id: panaderiaA, nombre: ejecucion.nombre('A') }]);
   igual('ninguna panadería expone más campos que id y nombre',
     Array.isArray(panaderias) && panaderias.every(p => JSON.stringify(Object.keys(p).sort()) === '["id","nombre"]'), true);
+  const listaB = await esperar('admin de B: GET /api/usuarios -> 200', 200, 'GET', '/api/usuarios', 'adminotra');
+  igual('el listado de B incluye sus cuentas y solo cuentas de B (ninguna de A)',
+    [[cuentas.adminotra, cuentas.objetivo, cuentas.mwvecino].every(id => listaB?.some(u => u.id === id)),
+      Array.isArray(listaB) && listaB.every(u => u.panaderia_id === panaderiaB), [cuentas.admin, cuentas.panaderoa].some(id => listaB?.some(u => u.id === id))],
+    [true, true, false]);
+  igual('admin de B: GET /api/panaderias solo devuelve B',
+    (await pedir('GET', '/api/panaderias', 'adminotra')).datos, [{ id: panaderiaB, nombre: ejecucion.nombre('B') }]);
+
+  // ---------- Acceso cruzado entre administradores de A y B ----------
+  // Una cuenta de otra panadería no se encuentra (404, el mismo mensaje que una inexistente) y no cambia
+  await ejecucion.exigirBloqueo();
+  console.log('\n== Acceso cruzado entre administradores de A y B');
+  const cruzadasAntes = [await fila(cuentas.objetivo), await fila(cuentas.adminotra), await fila(cuentas.admin), await fila(cuentas.panaderoa)];
+  for (const [descripcion, ruta, usuario, cuerpo] of [
+    ['admin de A edita el rol de una cuenta de B', `/api/usuarios/${cuentas.objetivo}`, 'admin', { rol_id: 3 }],
+    ['admin de A desactiva una cuenta de B', `/api/usuarios/${cuentas.objetivo}/estado`, 'admin', { estado: false }],
+    ['admin de A degrada a la administradora de B', `/api/usuarios/${cuentas.adminotra}`, 'admin', { rol_id: 2 }],
+    ['admin de A desactiva a la administradora de B', `/api/usuarios/${cuentas.adminotra}/estado`, 'admin', { estado: false }],
+    ['admin de B desactiva a la administradora de A', `/api/usuarios/${cuentas.admin}/estado`, 'adminotra', { estado: false }],
+    ['admin de B edita una cuenta de A indicando su panadería (B)', `/api/usuarios/${cuentas.panaderoa}`, 'adminotra', { rol_id: 3, panaderia_id: panaderiaB }]
+  ]) {
+    const r = await esperar(`${descripcion} -> 404`, 404, 'PATCH', ruta, usuario, cuerpo);
+    igual(`${descripcion}: mensaje de cuenta no encontrada`, r?.error, 'Cuenta no encontrada');
+  }
+  igual('las cuentas de A y B siguen sin cambios tras los accesos cruzados',
+    [await fila(cuentas.objetivo), await fila(cuentas.adminotra), await fila(cuentas.admin), await fila(cuentas.panaderoa)], cruzadasAntes);
 
   // ---------- Autoelevación y autoprotección ----------
   await ejecucion.exigirBloqueo();
@@ -356,10 +391,10 @@ const main = async () => {
   await esperar('admin se desactiva a sí mismo -> 403', 403, 'PATCH', `/api/usuarios/${cuentas.admin}/estado`, 'admin', { estado: false });
   await esperar('admin reenvía su mismo rol -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.admin}`, 'admin', { rol_id: 1 });
   igual('admin sigue activo y administrador', await fila(cuentas.admin),
-    { id: cuentas.admin, email: ejecucion.correo('admin'), rol_id: 1, panaderia_id: null, estado: 1 });
+    { id: cuentas.admin, email: ejecucion.correo('admin'), rol_id: 1, panaderia_id: panaderiaA, estado: 1 });
 
-  // Token de administrador desactualizado: la cuenta fue degradada después de emitirlo
-  await cuentaConToken('degradado', 'administrador', 1, null);
+  // Token de administrador desactualizado: la cuenta (administradora de A) fue degradada después de emitirlo
+  await cuentaConToken('degradado', 'administrador', 1, panaderiaA);
   await esperar('admin degrada a la cuenta a panadero -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.degradado}`, 'admin', { rol_id: 2, panaderia_id: panaderiaA });
   await esperar('token antiguo de admin degradado: GET /api/usuarios -> 403', 403, 'GET', '/api/usuarios', 'degradado');
   await esperar('token antiguo de admin degradado: se reasciende -> 403', 403, 'PATCH', `/api/usuarios/${cuentas.degradado}`, 'degradado', { rol_id: 1 });
@@ -367,8 +402,8 @@ const main = async () => {
   igual('la cuenta degradada sigue siendo panadero', (await fila(cuentas.degradado))?.rol_id, 2);
 
   // ---------- Último administrador activo: serialización real ----------
-  // Dos administradores temporales intentan degradarse (o desactivarse) mutuamente a la vez. El
-  // servicio bloquea (FOR UPDATE) a los administradores activos y a quien actúa: la segunda
+  // Dos administradores temporales de A intentan degradarse (o desactivarse) mutuamente a la vez. El
+  // servicio bloquea (FOR UPDATE) a los administradores activos de A y a quien actúa: la segunda
   // operación, al entrar, encuentra que su autor ya no es administrador activo y se rechaza. Sin esa
   // serialización, las dos se aplicarían. Se cuentan solo esas dos cuentas, nunca las demás.
   //
@@ -388,6 +423,7 @@ const main = async () => {
   ]) {
     const pareja = [cuentas[primero], cuentas[segundo]];
     igual(`${tipo}: las dos cuentas temporales son administradoras activas al empezar`, await adminsActivosEntre(pareja), 2);
+    igual(`${tipo}: las dos pertenecen a la misma panadería (A)`, [(await fila(pareja[0]))?.panaderia_id, (await fila(pareja[1]))?.panaderia_id], [panaderiaA, panaderiaA]);
     const observador = crearObservadorSolapamiento({ esBloqueo: esBloqueoAdministradores, pausaMs: 500, limiteMs: 5000 });
     const findAllOriginal = Usuario.findAll;
     const findByPkOriginal = Usuario.findByPk;
@@ -429,11 +465,19 @@ const main = async () => {
   await esperar('rol inexistente (7) -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { rol_id: 7 });
   await esperar('rol duplicado inactivo (4) -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { rol_id: 4 });
   await esperar('rol como lista -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { rol_id: [2] });
+  // La panadería de una cuenta no se cambia desde la administración: solo se admite la propia (sin efecto)
   await exigirInexistente('panaderias');
-  await esperar('panadería inexistente -> 404', 404, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { panaderia_id: ID_INEXISTENTE });
+  const noEditable = await esperar('panadería inexistente -> 400 (panaderia_id no editable)', 400, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { panaderia_id: ID_INEXISTENTE });
+  igual('mensaje de campo no editable', noEditable?.error, 'Campos no editables: panaderia_id');
   await esperar('panadería no numérica -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { panaderia_id: 'uno' });
   await esperar('panadero sin panadería -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { panaderia_id: null });
-  await esperar('administrador con panadería -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edvecino}`, 'admin', { rol_id: 1, panaderia_id: panaderiaB });
+  const aOtra = await esperar('mover la cuenta a B -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { panaderia_id: panaderiaB });
+  igual('mover a B: mensaje de campo no editable', aOtra?.error, 'Campos no editables: panaderia_id');
+  await esperar('cambiar rol y mover a B a la vez -> 400 (no se aplica nada)', 400, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { rol_id: 3, panaderia_id: panaderiaB });
+  const ascenso = await esperar('panadero -> administrador -> 403', 403, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { rol_id: 1 });
+  igual('ascenso: mensaje de permiso para asignar el rol de administrador', ascenso?.error, 'No tiene permisos para asignar el rol de administrador');
+  await esperar('panadero -> administrador indicando su panadería -> 403', 403, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { rol_id: 1, panaderia_id: panaderiaA });
+  await esperar('admin de A edita una cuenta de B -> 404', 404, 'PATCH', `/api/usuarios/${cuentas.edvecino}`, 'admin', { rol_id: 3 });
   igual('sin cambios tras los rechazos', [await fila(cuentas.edpan), await fila(cuentas.edvecino)], [
     { id: cuentas.edpan, email: ejecucion.correo('edpan'), rol_id: 2, panaderia_id: panaderiaA, estado: 1 },
     { id: cuentas.edvecino, email: ejecucion.correo('edvecino'), rol_id: 2, panaderia_id: panaderiaB, estado: 1 }
@@ -441,12 +485,9 @@ const main = async () => {
 
   const gerente = await esperar('panadero -> gerente (conserva panadería) -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { rol_id: 3 });
   igual('rol gerente y panadería A', [gerente?.rol, gerente?.panaderia_id], ['gerente', panaderiaA]);
-  const movido = await esperar('cambio de panadería a B -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin', { panaderia_id: panaderiaB });
-  igual('panadería actualizada', movido?.panaderia, { id: panaderiaB, nombre: ejecucion.nombre('B') });
-  const promovido = await esperar('panadero -> administrador sin panadería -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.edvecino}`, 'admin', { rol_id: 1 });
-  igual('administrador queda sin panadería', [promovido?.rol_id, promovido?.panaderia_id], [1, null]);
-  await esperar('administrador -> panadero sin indicar panadería -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edvecino}`, 'admin', { rol_id: 2 });
-  await esperar('administrador -> panadero con panadería B -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.edvecino}`, 'admin', { rol_id: 2, panaderia_id: panaderiaB });
+  const mismaPanaderia = await esperar('reenviar su propia panadería (A) -> 200 sin efecto', 200, 'PATCH', `/api/usuarios/${cuentas.edpan}`, 'admin',
+    { rol_id: 3, panaderia_id: panaderiaA });
+  igual('sigue en A', mismaPanaderia?.panaderia, { id: panaderiaA, nombre: ejecucion.nombre('A') });
 
   await esperar('email inválido -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edger}`, 'admin', { email: 'no-es-email' });
   await esperar('email vacío -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.edger}`, 'admin', { email: '   ' });
@@ -466,7 +507,7 @@ const main = async () => {
   await esperar('desactivar gerente -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.estger}/estado`, 'admin', { estado: false });
   const repetido = await esperar('desactivar de nuevo (idempotente) -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.estger}/estado`, 'admin', { estado: false });
   igual('sigue desactivado', repetido?.estado, false);
-  await esperar('editar una cuenta desactivada -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.estger}`, 'admin', { panaderia_id: panaderiaB });
+  await esperar('editar una cuenta desactivada -> 200', 200, 'PATCH', `/api/usuarios/${cuentas.estger}`, 'admin', { rol_id: 2 });
   igual('la edición no la reactiva', (await fila(cuentas.estger))?.estado, 0);
 
   // ---------- Cambio de contraseña ----------
@@ -525,13 +566,16 @@ const main = async () => {
   igual('y opera solo sobre su panadería real (sin panaderia_id)', await nombresInventario('perpanComoAdmin'), [nombreA]);
   igual('aunque pida otra panadería, se ignora', await nombresInventario('perpanComoAdmin', `?panaderia_id=${panaderiaB}`), [nombreA]);
 
-  // Cambio de panadería con el token anterior
+  // La panadería sale de la base: un token que dice B no da acceso a B a una cuenta de A, y la
+  // administración no puede mover la cuenta (la panadería no es editable)
   igual('el panadero ve su panadería A', await nombresInventario('perpan'), [nombreA]);
-  await pedir('PATCH', `/api/usuarios/${cuentas.perpan}`, 'admin', { panaderia_id: panaderiaB });
-  igual('tras moverlo a B, el mismo token ve la panadería B (inventario)', await nombresInventario('perpan'), [nombreB]);
-  const recetasB = await pedir('GET', '/api/produccion/recetas', 'perpan');
-  igual('recetas: responde con la panadería actual', recetasB.status, 200);
-  await pedir('PATCH', `/api/usuarios/${cuentas.perpan}`, 'admin', { panaderia_id: panaderiaA });
+  TOKENS.perpanConB = firmar(cuentas.perpan, 'perpan', 'panadero', 2, panaderiaB);
+  igual('con un token que dice panadería B sigue viendo solo A (inventario)', await nombresInventario('perpanConB'), [nombreA]);
+  const recetasPerpan = await pedir('GET', '/api/produccion/recetas', 'perpanConB');
+  igual('recetas: responde 200 y solo con productos de A (la panadería de la base)',
+    [recetasPerpan.status, Array.isArray(recetasPerpan.datos) && recetasPerpan.datos.every(r => r.panaderia_id === panaderiaA)], [200, true]);
+  await esperar('admin intenta mover al panadero a B -> 400', 400, 'PATCH', `/api/usuarios/${cuentas.perpan}`, 'admin', { panaderia_id: panaderiaB });
+  igual('la cuenta sigue en A y su token ve A', [(await fila(cuentas.perpan))?.panaderia_id, await nombresInventario('perpan')], [panaderiaA, [nombreA]]);
 
   // Degradación de panadero a gerente con el token anterior (gerente = solo lectura)
   await esperar('el panadero puede escribir en ventas (llega a la validación) -> 400', 400, 'POST', '/api/ventas', 'perpan', {});
@@ -547,12 +591,11 @@ const main = async () => {
   await pedir('PATCH', `/api/usuarios/${cuentas.perger}`, 'admin', { rol_id: 2 });
   await esperar('ya panadero, mismo token: venta llega a la validación -> 400', 400, 'POST', '/api/ventas', 'perger', {});
 
-  // Ascenso a administrador y vuelta atrás
-  await pedir('PATCH', `/api/usuarios/${cuentas.perascenso}`, 'admin', { rol_id: 1 });
-  await esperar('panadero ascendido, mismo token: GET /api/usuarios -> 200', 200, 'GET', '/api/usuarios', 'perascenso');
-  await esperar('como administrador debe indicar panadería -> 400', 400, 'GET', '/api/inventario', 'perascenso');
-  await pedir('PATCH', `/api/usuarios/${cuentas.perascenso}`, 'admin', { rol_id: 2, panaderia_id: panaderiaB });
-  await esperar('panadero degradado, mismo token: GET /api/usuarios -> 403', 403, 'GET', '/api/usuarios', 'perascenso');
+  // Ascenso a administrador: no se permite desde la administración, y el token no gana privilegios
+  await esperar('admin asciende a un panadero a administrador -> 403', 403, 'PATCH', `/api/usuarios/${cuentas.perascenso}`, 'admin', { rol_id: 1 });
+  igual('la cuenta sigue siendo panadero de A', [(await fila(cuentas.perascenso))?.rol_id, (await fila(cuentas.perascenso))?.panaderia_id], [2, panaderiaA]);
+  await esperar('panadero no ascendido, mismo token: GET /api/usuarios -> 403', 403, 'GET', '/api/usuarios', 'perascenso');
+  await esperar('y sigue operando en su panadería -> 200', 200, 'GET', '/api/inventario', 'perascenso');
 
   // Cambio de contraseña con un token cuyo email quedó desactualizado (el correo nuevo conserva la marca)
   await pedir('PATCH', `/api/usuarios/${idClave}`, 'admin', { email: ejecucion.correo('claverenombrada') });
@@ -594,6 +637,19 @@ const main = async () => {
   igual('puede iniciar sesión con letras no ASCII en la contraseña', (await login(ejecucion.correo('nuevoregistro'), 'ñandú2026')).status, 200);
   const repetido2 = await registro({ email: ejecucion.correo('nuevoregistro'), contrasena: 'Clave1234' });
   igual('email repetido -> 400 (contrato de siempre)', [repetido2.status, repetido2.datos?.error], [400, 'El email ya está registrado']);
+  igual('la cuenta registrada queda en la panadería del administrador (A)', (await fila(valido.datos?.id))?.panaderia_id, panaderiaA);
+
+  // La panadería la decide el backend: el panaderia_id del cliente se ignora
+  const conOtra = await registro({ email: ejecucion.correo('registrob'), contrasena: 'Clave1234', panaderia_id: panaderiaB });
+  igual('admin de A registra indicando B -> 201', conOtra.status, 201);
+  igual('la cuenta queda en A (la del administrador), no en B', [(await fila(conOtra.datos?.id))?.panaderia_id, (await fila(conOtra.datos?.id))?.rol_id], [panaderiaA, 2]);
+  const desdeB = await pedirRegistro('adminotra', { email: ejecucion.correo('registrodeb'), contrasena: 'Clave1234', rol_id: 3, panaderia_id: panaderiaA });
+  igual('admin de B registra indicando A -> 201', desdeB.status, 201);
+  igual('la cuenta queda en B (la del administrador), no en A', [(await fila(desdeB.datos?.id))?.panaderia_id, (await fila(desdeB.datos?.id))?.rol_id], [panaderiaB, 3]);
+  const correoAdminNuevo = ejecucion.correo('adminnuevo');
+  const adminNuevo = await registro({ email: correoAdminNuevo, contrasena: 'Clave1234', rol_id: 1 });
+  igual('registrar un administrador -> 403', [adminNuevo.status, adminNuevo.datos?.error], [403, 'No tiene permisos para crear administradores']);
+  igual('el registro de administrador no creó ninguna cuenta', await contarCorreos([correoAdminNuevo]), 0);
 
   // ---------- Revocación de sesiones (version_sesion) ----------
   await ejecucion.exigirBloqueo();

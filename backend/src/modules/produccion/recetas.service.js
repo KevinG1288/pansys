@@ -3,7 +3,7 @@ const { ErrorNegocio } = require('../../utils/errores');
 const { enTransaccion } = require('../../utils/transaccion');
 const {
   MAX_CANTIDAD_ORDEN, MAX_UNIDADES, aUnidades, deUnidades, aDecimal4, diezmilesimasACentavos,
-  parsearId, parsearEntero, parsearCantidad
+  parsearId, exigirPanaderiaId, parsearEntero, parsearCantidad
 } = require('./produccion.validaciones');
 
 const MAX_INSUMOS_RECETA = 50;
@@ -75,11 +75,10 @@ class RecetasService {
     return formatearNecesidad(necesidad);
   }
 
-  // Producto activo; si se indica panadería, debe pertenecer a ella (si no, 404)
+  // Producto activo de la panadería autorizada (de otra panadería: 404)
   async obtenerProducto(productoId, panaderiaId, opciones = {}) {
     const id = parsearId(productoId, 'producto_id');
-    const where = { id, estado: true };
-    if (panaderiaId) where.panaderia_id = panaderiaId;
+    const where = { id, estado: true, panaderia_id: exigirPanaderiaId(panaderiaId) };
 
     const producto = await Producto.findOne({ where, ...opciones });
     if (!producto) throw new ErrorNegocio('Producto no encontrado', 404);
@@ -92,7 +91,12 @@ class RecetasService {
       include: [{
         model: RecetaProducto,
         as: 'receta',
-        include: [{ model: MateriaPrima, attributes: ['id', 'nombre', 'unidad_medida', 'estado'] }]
+        // Solo materias primas de la misma panadería: una línea que apuntara a otra (datos
+        // inconsistentes) se muestra como desaparecida, sin revelar sus datos
+        include: [{
+          model: MateriaPrima, attributes: ['id', 'nombre', 'unidad_medida', 'estado'],
+          where: { panaderia_id: panaderiaId }, required: false
+        }]
       }],
       order: [['nombre', 'ASC'], [{ model: RecetaProducto, as: 'receta' }, 'materia_prima_id', 'ASC']]
     });
@@ -103,7 +107,11 @@ class RecetasService {
     const producto = await this.obtenerProducto(productoId, panaderiaId);
     const lineas = await RecetaProducto.findAll({
       where: { producto_id: producto.id },
-      include: [{ model: MateriaPrima, attributes: ['id', 'nombre', 'unidad_medida', 'estado'] }],
+      // Solo materias primas de la panadería del producto (una ajena se muestra como desaparecida)
+      include: [{
+        model: MateriaPrima, attributes: ['id', 'nombre', 'unidad_medida', 'estado'],
+        where: { panaderia_id: producto.panaderia_id }, required: false
+      }],
       order: [['materia_prima_id', 'ASC']]
     });
     if (lineas.length === 0) throw new ErrorNegocio('El producto no tiene receta', 404);
@@ -178,8 +186,10 @@ class RecetasService {
     });
     if (lineas.length === 0) throw new ErrorNegocio('El producto no tiene receta', 422);
 
+    // Solo de la panadería del producto: una materia prima ajena (receta inconsistente) no se lee
+    // ni se bloquea; queda como no encontrada y la comprobación siguiente responde 422
     const materias = await MateriaPrima.findAll({
-      where: { id: lineas.map(l => l.materia_prima_id) },
+      where: { id: lineas.map(l => l.materia_prima_id), panaderia_id: producto.panaderia_id },
       attributes: ATRIBUTOS_MATERIA_EXACTOS,
       order: [['id', 'ASC']],
       transaction,

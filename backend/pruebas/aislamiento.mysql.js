@@ -1,4 +1,4 @@
-// Verificación de pruebas/aislamiento.js contra MySQL real (hipótesis V1-V14 del plan). Escribe
+// Verificación de pruebas/aislamiento.js contra MySQL real (hipótesis V1-V15 del plan). Escribe
 // SOLO filas propias en pansys_test, marcadas con su runId, y las borra únicamente mediante
 // ejecucion.limpiar(). Si la limpieza no termina en "limpia", se detiene: no reintenta ni borra
 // por otra vía, e indica qué comprobar a mano.
@@ -12,6 +12,34 @@
 // (3) toda conexión usa database: 'pansys_test' literal y se comprueba con SELECT DATABASE();
 // (4) antes de cada escritura se vuelve a comprobar la base de esa conexión y que la sentencia
 // apunte a una tabla pansys_test.<tabla>. Ante cualquier discrepancia, aborta.
+//
+// Qué datos cambia (todo en pansys_test y solo en filas propias de esta ejecución):
+//  - Inserta cuentas, panaderías, materias primas, productos, recetas, ventas, detalles, órdenes e
+//    insumos temporales, marcados con el runId (correo "prueba.verificacion.<runId>." y nombres
+//    "PRUEBA <runId>"). Las cuentas 1-4 y las panaderías 1-2 de la semilla no se tocan.
+//  - Actualiza filas propias: V7 cambia el nombre de un producto propio dentro de una transacción
+//    que siempre termina en ROLLBACK (no queda ningún cambio); V15 asigna a una administradora
+//    propia la panadería propia de la que es propietaria (asignarPanaderia, una sola fila); y
+//    limpiar() desasigna esa panadería antes de retirar las filas, dentro de su transacción.
+//  - Las inserciones que V6 y V12 intentan contra filas bloqueadas deben fallar por tiempo de
+//    espera (1205); si alguna llegara a escribirse, es propia y la limpieza la incluye.
+//  - Los contadores AUTO_INCREMENT de las tablas avanzan de forma permanente, aunque la limpieza
+//    retire todas las filas temporales (MySQL no los retrocede). Es inocuo: la foto de
+//    foto_pansys_test.js no los compara.
+//
+// Interrupción (Ctrl+C, cierre de la terminal o caída del proceso): no hay manejador que limpie.
+// Si ocurre antes de que termine limpiar(), las filas temporales quedan en pansys_test,
+// identificadas por el runId que se imprime antes de la primera inserción; si ocurre durante la
+// limpieza, MySQL deshace su transacción al cerrarse la conexión y las filas también quedan.
+//
+// Recuperación ante cualquier fallo (código distinto de 0, una línea FALLA, una limpieza que no
+// termina en "limpia", una interrupción o una foto posterior con diferencias):
+//  1. No reintentar la verificación ni otra suite, y no retirar filas a mano ni por otra vía.
+//  2. Conservar la salida (runId, id de cuentas y panaderías pendientes) y tomar la foto posterior.
+//  3. Revisar en solo lectura qué filas con ese runId siguen en pansys_test.
+//  4. Cualquier corrección, incluida la restauración de un respaldo de pansys_test, requiere una
+//     autorización expresa aparte: antes de restaurar, comprobar el SHA-256 del respaldo y que la
+//     conexión apunta a pansys_test; después, comparar recuentos y CHECKSUM TABLE con lo esperado.
 //
 // Cada OK de este script solo vale para el servidor y el momento en que se ejecuta.
 
@@ -339,6 +367,26 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
     } finally {
       await consultar(aux, 'ROLLBACK');
     }
+
+    // ---------- V15: un administrador por panadería (ciclo de claves foráneas) ----------
+    // Con las escrituras protegidas de aislamiento.js: una administradora sin panadería, una
+    // panadería de la que es propietaria, su asignación a esa panadería y una cuenta más en ella.
+    // La administradora queda propietaria (panaderias.usuario_id, CASCADE) y asignada
+    // (usuarios.panaderia_id, RESTRICT) a la vez. La comprobación decisiva es V5: limpiar() deshace
+    // el ciclo desasignándola antes de borrar, con los recuentos previstos.
+    await ejecucion.exigirBloqueo();
+    const adminC = await ejecucion.crearCuenta({ etiqueta: 'adminc', rol: 'administrador', activa: false });
+    previstos['usuarios (propietarias)'] += 1;
+    const panC = await ejecucion.crearPanaderia({ etiqueta: 'C', propietariaId: adminC });
+    previstos.panaderias += 1;
+    await ejecucion.asignarPanaderia({ cuentaId: adminC, panaderiaId: panC });
+    // limpiar() informa de la desasignación antes que de los borrados: va primera en el recuento
+    previstos = { 'usuarios (propietarias desasignadas)': 1, ...previstos };
+    await ejecucion.crearCuenta({ etiqueta: 'gerentec', rol: 'gerente', panaderiaId: panC, activa: false });
+    previstos['usuarios (empleados)'] += 1;
+    const [asignada] = await consultar(aux, 'SELECT panaderia_id, rol_id FROM pansys_test.usuarios WHERE id = ?', [adminC]);
+    informe.comprobar('V15', 'la administradora queda asignada a la panadería de la que es propietaria',
+      Number(asignada?.panaderia_id) === panC && Number(asignada?.rol_id) === 1, `panaderia_id = ${asignada?.panaderia_id ?? '(sin fila)'}`);
 
     // ---------- V3: al destruir una conexión, MySQL suelta sus bloqueos (con un bloqueo aparte) ----------
     const v3 = await abrirConexion(crearConexion, env, 'v3');

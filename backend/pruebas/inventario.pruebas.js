@@ -4,7 +4,9 @@
 // Aislamiento (pruebas/aislamiento.js): se ejecuta SOLO contra pansys_test, con el bloqueo de
 // suite durante toda la ejecución. Crea una cuenta administradora temporal (inactiva), una
 // panadería temporal suya y una cuenta panadera temporal activa en ella; todas las operaciones de
-// inventario ocurren en esa panadería. Al terminar, ejecucion.limpiar() borra solo lo registrado
+// inventario ocurren en esa panadería. Para el aislamiento entre panaderías crea además una segunda
+// panadería temporal (B, de la misma propietaria) con su cuenta panadera, que solo crea una materia
+// prima propia en B. Al terminar, ejecucion.limpiar() borra solo lo registrado
 // por esta ejecución (una vez, sin reintentos). No hay ningún borrado propio en esta suite.
 //
 // El servidor de la API arranca en un puerto asignado por el sistema (PORT=0) y la suite obtiene
@@ -45,14 +47,17 @@ const registrar = (ok, descripcion, detalle = '') => {
 let ejecucion = null;
 let servidor = null;
 let panaderiaId = null;
+let panaderiaB = null;
 let URL = null;
 let TOKEN = null;
+let TOKEN_B = null;
 
-const pedir = async (metodo, ruta, body) => {
-  if (!URL || !TOKEN) throw new Error('No se envían peticiones: la identidad del servidor no está confirmada');
+// token: por defecto el del panadero de la panadería temporal; TOKEN_B solo en el bloque de aislamiento
+const pedir = async (metodo, ruta, body, token = TOKEN) => {
+  if (!URL || !token) throw new Error('No se envían peticiones: la identidad del servidor no está confirmada');
   const r = await fetch(URL + ruta, {
     method: metodo,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   let datos = null;
@@ -60,8 +65,8 @@ const pedir = async (metodo, ruta, body) => {
   return { status: r.status, datos };
 };
 
-const esperar = async (descripcion, status, metodo, ruta, body) => {
-  const r = await pedir(metodo, ruta, body);
+const esperar = async (descripcion, status, metodo, ruta, body, token) => {
+  const r = await pedir(metodo, ruta, body, token);
   registrar(r.status === status, descripcion, `HTTP ${r.status}: ${JSON.stringify(r.datos)}`);
   return r.datos;
 };
@@ -76,6 +81,12 @@ const enBase = async (id) => (await sequelize.query(
   `SELECT CAST(cantidad_disponible AS CHAR) AS disponible, CAST(stock_minimo AS CHAR) AS minimo,
           CAST(precio_unitario AS CHAR) AS precio FROM pansys_test.materia_prima WHERE id = ? AND panaderia_id = ?`,
   { replacements: [id ?? 0, panaderiaId] }))[0][0];
+
+// Fila de la materia prima de B (solo esa panadería temporal), para comprobar que no cambia
+const enBaseB = async (id) => (await sequelize.query(
+  `SELECT CAST(cantidad_disponible AS CHAR) AS disponible, CAST(precio_unitario AS CHAR) AS precio, estado
+   FROM pansys_test.materia_prima WHERE id = ? AND panaderia_id = ?`,
+  { replacements: [id ?? 0, panaderiaB] }))[0][0];
 
 const contar = async () => Number((await sequelize.query(
   'SELECT COUNT(*) AS n FROM pansys_test.materia_prima WHERE panaderia_id = ?', { replacements: [panaderiaId] }))[0][0].n);
@@ -168,10 +179,16 @@ const main = async () => {
   const adminId = await ejecucion.crearCuenta({ etiqueta: 'admin', rol: 'administrador', activa: false });
   panaderiaId = await ejecucion.crearPanaderia({ etiqueta: 'Inventario', propietariaId: adminId });
   const panaderoId = await ejecucion.crearCuenta({ etiqueta: 'panadero', rol: 'panadero', panaderiaId, activa: true });
-  // Token de la cuenta temporal: el middleware lee rol, panadería y estado de la base
+  panaderiaB = await ejecucion.crearPanaderia({ etiqueta: 'B', propietariaId: adminId });
+  const panaderoBId = await ejecucion.crearCuenta({ etiqueta: 'panaderob', rol: 'panadero', panaderiaId: panaderiaB, activa: true });
+  // Tokens de las cuentas temporales: el middleware lee rol, panadería y estado de la base
   TOKEN = jwt.sign({
     id: panaderoId, email: ejecucion.correo('panadero'), rol: 'panadero', rol_id: 2,
     panaderia_id: panaderiaId, version_sesion: 0
+  }, process.env.JWT_SECRET, { expiresIn: '10m' });
+  TOKEN_B = jwt.sign({
+    id: panaderoBId, email: ejecucion.correo('panaderob'), rol: 'panadero', rol_id: 2,
+    panaderia_id: panaderiaB, version_sesion: 0
   }, process.env.JWT_SECRET, { expiresIn: '10m' });
 
   await arrancarServidor();
@@ -269,6 +286,40 @@ const main = async () => {
     'SELECT COUNT(*) AS n FROM pansys_test.materia_prima WHERE id IN (?) AND panaderia_id <> ?', { replacements: [bajos, panaderiaId] }))[0][0].n) : 0;
   igual('stock bajo solo devuelve materias primas de la panadería temporal', bajosAjenos, 0);
 
+  // ---------- Aislamiento entre panaderías ----------
+  // Un registro de otra panadería no se encuentra (404 al consultarlo, 400 al editarlo o eliminarlo:
+  // contrato de siempre) y el panaderia_id del cliente, en la query o en el cuerpo, se ignora.
+  // La materia prima de B no usa insumo(): su nombre no entra en nombresEnviados porque está, a
+  // propósito, fuera de la panadería temporal A.
+  await ejecucion.exigirBloqueo();
+  console.log('\n== Aislamiento entre panaderías (por id y con panaderia_id del cliente)');
+  const ajena = (await pedir('POST', '/api/inventario',
+    { nombre: ejecucion.nombre('AjenaB'), unidad_medida: 'kg', cantidad_disponible: 3, stock_minimo: 1, precio_unitario: 2 }, TOKEN_B)).datos;
+  igual('el panadero de B crea su materia prima en B', ajena?.panaderia_id, panaderiaB);
+  const ajenaAntes = await enBaseB(ajena?.id);
+  igual('la materia prima de B existe en la base (activa)', ajenaAntes, { disponible: '3.0000', precio: '2.0000', estado: 1 });
+  await esperar('panadero de A consulta por id una materia prima de B -> 404', 404, 'GET', `/api/inventario/${ajena?.id}`);
+  await esperar('panadero de A consulta por id una materia prima de B con ?panaderia_id=B -> 404', 404, 'GET',
+    `/api/inventario/${ajena?.id}?panaderia_id=${panaderiaB}`);
+  const edicionAjena = await esperar('panadero de A edita una materia prima de B indicando B -> 400', 400, 'PUT',
+    `/api/inventario/${ajena?.id}?panaderia_id=${panaderiaB}`, { precio_unitario: 9, panaderia_id: panaderiaB });
+  igual('edición ajena: mensaje de no encontrada', edicionAjena?.error, 'Materia prima no encontrada');
+  await esperar('panadero de A elimina una materia prima de B con ?panaderia_id=B -> 400', 400, 'DELETE',
+    `/api/inventario/${ajena?.id}?panaderia_id=${panaderiaB}`);
+  igual('la materia prima de B no cambia y sigue activa', await enBaseB(ajena?.id), ajenaAntes);
+  await esperar('panadero de B consulta por id una materia prima de A -> 404', 404, 'GET', `/api/inventario/${fino?.id}`, undefined, TOKEN_B);
+
+  const listadoConB = (await pedir('GET', `/api/inventario?panaderia_id=${panaderiaB}`)).datos;
+  igual('listado con ?panaderia_id=B: solo materias primas de A (sin la de B)',
+    [Array.isArray(listadoConB) && listadoConB.length > 0 && listadoConB.every(i => i.panaderia_id === panaderiaId), listadoConB?.some?.(i => i.id === ajena?.id)],
+    [true, false]);
+  const creadaConB = await esperar('crear indicando B en la query y en el cuerpo -> 201 en A', 201, 'POST', `/api/inventario?panaderia_id=${panaderiaB}`,
+    insumo('ConB', { cantidad_disponible: 1, panaderia_id: panaderiaB }));
+  igual('se crea en la panadería de la cuenta (A), no en B', [creadaConB?.panaderia_id, (await enBase(creadaConB?.id))?.disponible], [panaderiaId, '1.0000']);
+  const sinMover = await esperar('editar enviando solo panaderia_id de B -> 200 sin efecto', 200, 'PUT', `/api/inventario/${fino?.id}`, { panaderia_id: panaderiaB });
+  igual('la materia prima sigue en A con sus valores', [sinMover?.panaderia_id, await enBase(fino?.id)],
+    [panaderiaId, { disponible: '0.0001', minimo: '0.1250', precio: '7.0005' }]);
+
   // ---------- Invariantes ----------
   await ejecucion.exigirBloqueo();
   console.log('\n== Invariantes');
@@ -276,7 +327,7 @@ const main = async () => {
     'SELECT COUNT(*) AS n FROM pansys_test.materia_prima WHERE panaderia_id = ? AND (cantidad_disponible < 0 OR stock_minimo < 0 OR precio_unitario < 0)',
     { replacements: [panaderiaId] });
   igual('ninguna materia prima de la prueba con valores negativos', Number(negativos.n), 0);
-  igual('las 8 materias primas creadas están en la panadería temporal', await contar(), 8);
+  igual('las 9 materias primas creadas en A están en la panadería temporal', await contar(), 9);
   igual('se enviaron nombres de prueba (la comprobación siguiente no es vacía)', nombresEnviados.size > 0, true);
   igual('ninguna petición de la suite creó materias primas fuera de la panadería temporal (por nombre exacto)', await contarNombresPropiosFuera(), 0);
 };

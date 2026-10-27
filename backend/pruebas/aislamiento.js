@@ -10,8 +10,13 @@
 // 3. Limpieza transaccional en la conexión dedicada: comprobaciones previas (base, bloqueo,
 //    marcas y dependencias ajenas, incluidos los detalles de ventas ajenas que referencien
 //    productos propios y que el ON DELETE CASCADE borraría), borrado en orden de claves foráneas
-//    con recuento previo y verificación de filas afectadas, y nueva comprobación del bloqueo
-//    antes del COMMIT.
+//    con recuento previo y verificación de filas afectadas, comprobación de que no queda ninguna
+//    fila propia y nueva comprobación del bloqueo antes del COMMIT.
+//    Un administrador por panadería: la panadería necesita una propietaria (usuario_id NOT NULL)
+//    antes de existir, así que la administradora se crea sin panadería, se crea la panadería y se
+//    le asigna con asignarPanaderia(). Ese ciclo (usuarios.panaderia_id RESTRICT y
+//    panaderias.usuario_id CASCADE) se deshace en la limpieza, antes de borrar, desasignando a las
+//    propietarias propias.
 //    Ante cualquier duda: ROLLBACK, y los registros temporales quedan para revisión posterior.
 //
 // El bloqueo no excluye a otros procesos que escriban en pansys_test (demo, npm run dev,
@@ -27,12 +32,20 @@ const MAX_ID_SEMILLA = { usuarios: 4, panaderias: 2 };
 // Tablas del SQL 005 (aún no existen en pansys_test): se limpian solo si existen
 const TABLAS_OPCIONALES = ['eventos_seguridad', 'restablecimientos_contrasena'];
 
-// Escrituras protegidas: las ÚNICAS sentencias de escritura del módulo, aparte del DELETE de la
-// limpieza. No se acepta SQL de fuera. Contraseña '!' (no es un hash: no permite iniciar sesión).
+// Escrituras protegidas: las ÚNICAS sentencias de escritura del módulo, aparte del DELETE y de la
+// desasignación de la limpieza. No se acepta SQL de fuera. Contraseña '!' (no es un hash: no
+// permite iniciar sesión).
 const PLANTILLA_CUENTA = "INSERT INTO pansys_test.usuarios (email, contrasena, rol_id, panaderia_id, estado, version_sesion, createdAt, updatedAt) VALUES (?, '!', ?, ?, ?, 0, NOW(), NOW())";
 const PLANTILLA_PANADERIA = "INSERT INTO pansys_test.panaderias (nombre, direccion, telefono, en_red, usuario_id, createdAt, updatedAt) VALUES (?, 'Dirección temporal de pruebas', NULL, 0, ?, NOW(), NOW())";
 // Producto temporal, solo en una panadería propia (precio_compra fijo en 0)
 const PLANTILLA_PRODUCTO = 'INSERT INTO pansys_test.productos (nombre, precio_compra, precio_venta, cantidad_disponible, panaderia_id, estado, createdAt, updatedAt) VALUES (?, 0, ?, ?, ?, ?, NOW(), NOW())';
+// Asignación de una panadería propia a una administradora propia creada sin panadería. Parámetros:
+// [panadería, id de la cuenta, su correo marcado]. Solo afecta a esa fila si sigue sin panadería.
+const PLANTILLA_ASIGNAR_PANADERIA = 'UPDATE pansys_test.usuarios SET panaderia_id = ? WHERE id = ? AND email = ? AND rol_id = 1 AND panaderia_id IS NULL';
+// Limpieza: propietarias propias asignadas a una panadería propia (recuento y desasignación, mismo
+// WHERE). Parámetros: [cuentas propias, panaderías propias, panaderías propias].
+const SQL_PROPIETARIAS_ASIGNADAS = 'SELECT COUNT(*) AS n FROM pansys_test.usuarios WHERE id IN (?) AND panaderia_id IN (?) AND id IN (SELECT usuario_id FROM pansys_test.panaderias WHERE id IN (?))';
+const SQL_DESASIGNAR_PROPIETARIAS = 'UPDATE pansys_test.usuarios SET panaderia_id = NULL WHERE id IN (?) AND panaderia_id IN (?) AND id IN (SELECT usuario_id FROM pansys_test.panaderias WHERE id IN (?))';
 // Comprobación R1 de la limpieza (ver comprobarAntesDeBorrar). Se exportan para que la verificación
 // contra MySQL real (aislamiento.mysql.js) use exactamente el mismo texto. Parámetros:
 // bloqueo [panaderías propias]; detalles [panaderías propias, panaderías propias].
@@ -204,6 +217,8 @@ class Ejecucion {
     // con su panadería; sus id sirven para comprobar, antes de borrar, que siguen en una
     // panadería propia, y para informar de pendientes.
     this.productosPropios = new Set();
+    // Administradoras creadas sin panadería (propietarias) y aún sin asignar: id -> correo marcado
+    this.propietariasSinPanaderia = new Map();
     this.rolesVerificados = false;
     // Filas que pueden existir sin estar registradas (resultado del INSERT desconocido): nunca se
     // borran ni se adoptan; se informan para revisarlas a mano
@@ -255,10 +270,18 @@ class Ejecucion {
 
   // ---------- Escrituras protegidas ----------
   // Cuenta temporal con correo marcado y contraseña '!'. Devuelve su id, ya registrado.
-  //   rol: 'administrador' (sin panadería) | 'panadero' | 'gerente' (con una panadería propia)
+  //   rol: 'panadero' | 'gerente' (con una panadería propia) | 'administrador' (con una panadería
+  //   propia, o sin panadería para ser propietaria de panaderías temporales y recibir después
+  //   una con asignarPanaderia)
   //   activa: true o false (estricto)
   crearCuenta(opciones) {
     return this.#encolar(() => this.#escribirCuenta(opciones ?? {}));
+  }
+
+  // Asigna una panadería propia a una administradora propia creada sin panadería. Devuelve el id
+  // de la cuenta. Es la única actualización de filas durante la ejecución.
+  asignarPanaderia(opciones) {
+    return this.#encolar(() => this.#escribirAsignacion(opciones ?? {}));
   }
 
   // Panadería temporal con nombre marcado, propiedad de una cuenta propia. Devuelve su id, ya registrado.
@@ -284,16 +307,59 @@ class Ejecucion {
     if (this.etiquetasUsadas.usuarios.has(etiqueta)) throw new ErrorAislamiento(`La etiqueta de cuenta "${etiqueta}" ya se usó en esta ejecución`);
     if (!Object.prototype.hasOwnProperty.call(ROLES, rol)) throw new ErrorAislamiento(`Rol no válido: ${JSON.stringify(rol)}`);
     if (typeof activa !== 'boolean') throw new ErrorAislamiento('activa debe ser true o false');
-    if (rol === 'administrador') {
-      if (panaderiaId !== null) throw new ErrorAislamiento('Una cuenta administradora no se asigna a una panadería');
-    } else if (!this.propios.panaderias.has(panaderiaId)) {
+    // Solo una administradora puede crearse sin panadería (propietaria); el resto, en una propia
+    const sinPanaderia = rol === 'administrador' && panaderiaId === null;
+    if (!sinPanaderia && !this.propios.panaderias.has(panaderiaId)) {
       throw new ErrorAislamiento(`La panadería ${JSON.stringify(panaderiaId)} no es una panadería registrada por esta ejecución`);
     }
     await this.#comprobarAntesDeEscribir();
     await this.#comprobarRoles();
     const email = this.correo(etiqueta);
     this.etiquetasUsadas.usuarios.add(etiqueta);
-    return this.#insertar('usuarios', [email, ROLES[rol], panaderiaId, activa ? 1 : 0], email);
+    const id = await this.#insertar('usuarios', [email, ROLES[rol], panaderiaId, activa ? 1 : 0], email);
+    if (sinPanaderia) this.propietariasSinPanaderia.set(id, email);
+    return id;
+  }
+
+  async #escribirAsignacion({ cuentaId, panaderiaId }) {
+    const email = this.propietariasSinPanaderia.get(cuentaId);
+    if (email === undefined) {
+      throw new ErrorAislamiento(`La cuenta ${JSON.stringify(cuentaId)} no es una administradora sin panadería creada por esta ejecución`);
+    }
+    if (!this.propios.panaderias.has(panaderiaId)) {
+      throw new ErrorAislamiento(`La panadería ${JSON.stringify(panaderiaId)} no es una panadería registrada por esta ejecución`);
+    }
+    await this.#comprobarAntesDeEscribir();
+    let resultado;
+    try {
+      resultado = await this.#bloqueo.consultar(PLANTILLA_ASIGNAR_PANADERIA, [panaderiaId, cuentaId, email]);
+    } catch (error) {
+      if (error instanceof ErrorAislamiento) {
+        this.abortar(error.message);
+        throw error; // no llegó a enviarse
+      }
+      const definitivo = Number.isInteger(error?.errno) && typeof error?.sqlState === 'string' && !error?.fatal && !this.#bloqueo.perdido;
+      if (definitivo) {
+        throw new ErrorAislamiento(`usuarios: MySQL rechazó la asignación (${error.code ?? error.errno}); la cuenta sigue sin panadería`);
+      }
+      return this.#asignacionIncierta(`sin respuesta válida (${error?.code ?? 'sin código'})`, Boolean(error?.fatal));
+    }
+    if (resultado?.affectedRows !== 1) return this.#asignacionIncierta('no se actualizó exactamente una fila', false);
+    this.propietariasSinPanaderia.delete(cuentaId);
+    return cuentaId;
+  }
+
+  // La cuenta ya está registrada: asignada o no, la limpieza la trata (la desasigna si hace falta
+  // y la borra). No se reintenta; se detienen las escrituras, o la ejecución si se perdió la conexión.
+  #asignacionIncierta(detalle, conexionPerdida) {
+    const motivo = `asignación de panadería de resultado incierto (${detalle})`;
+    if (conexionPerdida || this.#bloqueo.perdido) {
+      this.#bloqueo.marcarPerdido('conexión perdida durante una escritura');
+      this.abortar(`${motivo} y conexión perdida`);
+    } else {
+      this.escriturasDetenidas = motivo;
+    }
+    throw new ErrorAislamiento(`usuarios: ${motivo}. No se reintenta`);
   }
 
   async #escribirPanaderia({ etiqueta, propietariaId }) {
@@ -499,6 +565,7 @@ class Ejecucion {
       await this.#bloqueo.consultar('START TRANSACTION');
       transaccionAbierta = true;
       const tablasOpcionales = await this.comprobarAntesDeBorrar(propios);
+      await this.#desasignarPropietarias(propios, borrados);
       for (const paso of this.pasosDeBorrado(tablasOpcionales, propios)) {
         const [{ n }] = await this.#bloqueo.consultar(`SELECT COUNT(*) AS n FROM ${tabla(paso.tabla)} WHERE ${paso.where}`, paso.params);
         const resultado = await this.#bloqueo.consultar(`DELETE FROM ${tabla(paso.tabla)} WHERE ${paso.where}`, paso.params);
@@ -507,6 +574,8 @@ class Ejecucion {
         }
         borrados[paso.descripcion] = Number(n);
       }
+      // Ninguna fila propia puede seguir existiendo antes del COMMIT
+      await this.#comprobarSinRestos(propios);
       // El bloqueo debe seguir siendo nuestro hasta el final
       await this.#bloqueo.verificar();
       commitEnviado = true;
@@ -639,8 +708,35 @@ class Ejecucion {
     return existentes.map(f => f.tabla ?? f.TABLE_NAME);
   }
 
+  // Una administradora propia que es propietaria de una panadería propia y está asignada a una
+  // panadería propia forma un ciclo de claves foráneas (usuarios.panaderia_id RESTRICT y
+  // panaderias.usuario_id CASCADE). Dentro de la transacción y después de comprobarAntesDeBorrar
+  // (filas propias bloqueadas, con marca y sin relaciones ajenas), se desasigna: así se borra como
+  // propietaria, al final. Solo ids propios; si el número de filas no coincide, ROLLBACK.
+  async #desasignarPropietarias({ usuarios, panaderias }, borrados) {
+    if (!usuarios.length || !panaderias.length) return;
+    const params = [usuarios, panaderias, panaderias];
+    const n = Number((await this.#bloqueo.consultar(SQL_PROPIETARIAS_ASIGNADAS, params))[0].n);
+    if (!n) return;
+    const resultado = await this.#bloqueo.consultar(SQL_DESASIGNAR_PROPIETARIAS, params);
+    if (resultado.affectedRows !== n) {
+      throw new ErrorAislamiento(`propietarias asignadas: se esperaban ${n} filas y se desasignaron ${resultado.affectedRows}`);
+    }
+    borrados['usuarios (propietarias desasignadas)'] = n;
+  }
+
+  // Después de borrar y antes del COMMIT: no queda ninguna cuenta, panadería ni producto propio
+  async #comprobarSinRestos({ usuarios, panaderias, productos }) {
+    for (const [nombre, ids] of [['usuarios', usuarios], ['panaderias', panaderias], ['productos', productos]]) {
+      if (!ids.length) continue;
+      const n = Number((await this.#bloqueo.consultar(`SELECT COUNT(*) AS n FROM ${tabla(nombre)} WHERE id IN (?)`, [ids]))[0].n);
+      if (n) throw new ErrorAislamiento(`Quedan ${n} filas propias en ${nombre} después de borrar`);
+    }
+  }
+
   // Orden según las claves foráneas de crear_pansys_test.sql: primero las tablas hijas
-  // (RESTRICT), después las cuentas empleadas, las panaderías y por último sus propietarias.
+  // (RESTRICT), después las cuentas empleadas, las panaderías y por último sus propietarias
+  // (ya desasignadas por #desasignarPropietarias).
   pasosDeBorrado(tablasOpcionales, { usuarios, panaderias }) {
     const pasos = [];
     const subconsulta = (madre) => `SELECT id FROM ${tabla(madre)} WHERE panaderia_id IN (?)`;
@@ -766,8 +862,11 @@ module.exports = {
   PLANTILLA_CUENTA,
   PLANTILLA_PANADERIA,
   PLANTILLA_PRODUCTO,
+  PLANTILLA_ASIGNAR_PANADERIA,
   SQL_BLOQUEO_PRODUCTOS,
   SQL_DETALLES_AJENOS,
+  SQL_PROPIETARIAS_ASIGNADAS,
+  SQL_DESASIGNAR_PROPIETARIAS,
   ErrorAislamiento,
   verificarConfiguracion,
   abrirBloqueo,

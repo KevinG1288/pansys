@@ -270,6 +270,13 @@ INSERT INTO panaderias (id, nombre, direccion, telefono, en_red, usuario_id, cre
   (1, 'Panadería Prueba Uno', 'Dirección de prueba 1', NULL, 1, 1, NOW(), NOW()),
   (2, 'Panadería Prueba Dos', 'Dirección de prueba 2', NULL, 1, 1, NOW(), NOW());
 
+-- Un administrador por panadería: la cuenta 1 es la administradora de la panadería 1. Se inserta
+-- sin panadería porque toda panadería necesita antes su propietaria (panaderias.usuario_id NOT
+-- NULL) y se le asigna en cuanto la panadería existe: así ninguna inserción referencia una fila
+-- que aún no existe. La panadería 2 queda sin administrador en la semilla; el suyo se crea con el
+-- procedimiento controlado.
+UPDATE usuarios SET panaderia_id = 1 WHERE id = 1 AND rol_id = 1 AND panaderia_id IS NULL;
+
 INSERT INTO usuarios (id, email, contrasena, rol_id, panaderia_id, estado, createdAt, updatedAt) VALUES
   (2, 'panadero1@pansys.test', '!', 2, 1, 1, NOW(), NOW()),
   (3, 'panadero2@pansys.test', '!', 2, 2, 1, NOW(), NOW()),
@@ -281,6 +288,12 @@ SELECT DATABASE() AS base_actual;
 SELECT COUNT(*) AS tablas FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'pansys_test';
 SELECT (SELECT COUNT(*) FROM roles) AS roles, (SELECT COUNT(*) FROM usuarios) AS usuarios,
        (SELECT COUNT(*) FROM panaderias) AS panaderias;
+
+-- Esperado: 0 cuentas sin panadería (tampoco administradores) y la cuenta 1 en la panadería 1
+SELECT SUM(panaderia_id IS NULL) AS cuentas_sin_panaderia,
+       SUM(rol_id = 1 AND panaderia_id IS NULL) AS administradores_sin_panaderia,
+       (SELECT panaderia_id FROM usuarios WHERE id = 1) AS panaderia_cuenta_1
+FROM usuarios;
 
 -- Esperado: decimal(12,4) | NO | 0.0000 en las tres columnas (SQL 003)
 SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT

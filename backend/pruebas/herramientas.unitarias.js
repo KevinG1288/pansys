@@ -424,10 +424,12 @@ function ejecutarPruebas() {
 
     console.log('\n== aislamiento.mysql.js: flujo completo con dobles');
     // Doble de MySQL para el script y ejecución doble del módulo de aislamiento
-    // V11 añade una venta y un detalle; V13, dos materias primas (todo propio)
+    // V11 añade una venta y un detalle; V13, dos materias primas; V15, una administradora asignada a
+    // su panadería (se desasigna antes de borrar), esa panadería y una cuenta más en ella (todo propio)
     const PREVISTOS = {
+      'usuarios (propietarias desasignadas)': 1,
       insumo_usado: 1, orden_produccion: 1, receta_producto: 1, detalle_ventas: 2, ventas: 2, productos: 2,
-      materia_prima: 3, 'usuarios (empleados)': 1, panaderias: 2, 'usuarios (propietarias)': 1
+      materia_prima: 3, 'usuarios (empleados)': 2, panaderias: 3, 'usuarios (propietarias)': 2
     };
     const CONTAR_MATERIAS = 'SELECT COUNT(*) AS n FROM pansys_test.materia_prima WHERE panaderia_id = ?';
     // Opciones de V11-V14: v11Detecta (la consulta de detalles ajenos cuenta el detalle cruzado),
@@ -438,7 +440,7 @@ function ejecutarPruebas() {
       borradosSinDatos = {} } = {}) => {
       const estado = {
         conexiones: [], eventos: [], todas: [], ids: 500, productos: {}, bloqueoPanaderia: false, v3Dueno: null, limpio: false,
-        panaderias: [], materias: {}, bloqueoProductos: false
+        panaderias: [], materias: {}, bloqueoProductos: false, asignaciones: {}
       };
       // Instantánea de una transacción (REPEATABLE-READ): recuento de materias primas por panadería
       const fijarVista = (c) => { if (!c.vista) c.vista = { ...estado.materias }; };
@@ -514,6 +516,9 @@ function ejecutarPruebas() {
             return [{ affectedRows: 1 }];
           }
           if (sql === 'SELECT nombre FROM pansys_test.productos WHERE id = ?') return [[{ nombre: estado.productos[params[0]] }]];
+          if (sql === 'SELECT panaderia_id, rol_id FROM pansys_test.usuarios WHERE id = ?') {
+            return [[{ panaderia_id: estado.asignaciones[params[0]] ?? null, rol_id: 1 }]];
+          }
           if (sql === 'SELECT GET_LOCK(?, 0) AS obtenido') { estado.v3Dueno = c.id; return [[{ obtenido: 1 }]]; }
           if (sql === 'SELECT IS_USED_LOCK(?) AS dueno') return [[{ dueno: estado.v3Dueno }]];
           throw new Error(`SQL no previsto por el doble del script: ${sql}`);
@@ -529,6 +534,10 @@ function ejecutarPruebas() {
       ejecucion.registrar = (tipo, id) => { ejecucion.propios[tipo].push(id); return id; };
       ejecucion.ids = (tipo) => [...ejecucion.propios[tipo]];
       ejecucion.exigirBloqueo = async () => { ejecucion.llamadas.exigirBloqueo++; };
+      // Escrituras protegidas del módulo (V15): solo registran; no envían SQL por las conexiones del script
+      ejecucion.crearCuenta = async () => ejecucion.registrar('usuarios', ++estado.ids);
+      ejecucion.crearPanaderia = async () => ejecucion.registrar('panaderias', ++estado.ids);
+      ejecucion.asignarPanaderia = async ({ cuentaId, panaderiaId }) => { estado.asignaciones[cuentaId] = panaderiaId; return cuentaId; };
       ejecucion.limpiar = async () => {
         ejecucion.llamadas.limpiar++;
         estado.eventos.push('limpiar');
@@ -557,8 +566,8 @@ function ejecutarPruebas() {
       const e = crearEscenario();
       const codigo = await e.correr();
       igual('flujo correcto -> código 0 y todas las comprobaciones OK', [codigo, e.salida.filter(l => l.startsWith('FALLA'))], [0, []]);
-      igual('se informan V1-V8 y V10-V14',
-        [...new Set(lineasOk(e.salida))].filter(c => c !== '--').sort(), ['V1', 'V10', 'V11', 'V12', 'V13', 'V14', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8']);
+      igual('se informan V1-V8 y V10-V15',
+        [...new Set(lineasOk(e.salida))].filter(c => c !== '--').sort(), ['V1', 'V10', 'V11', 'V12', 'V13', 'V14', 'V15', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8']);
       igual('V11-V13 usan las sentencias exactas de aislamiento.js (detalles ajenos 2 veces, bloqueo de productos 2 veces)',
         [e.estado.todas.filter(s => s === SQL_DETALLES_AJENOS).length, e.estado.todas.filter(s => s === SQL_BLOQUEO_PRODUCTOS).length], [2, 2]);
       const aux = e.estado.conexiones[1];
@@ -581,8 +590,10 @@ function ejecutarPruebas() {
       igual('las conexiones auxiliares se cierran antes de limpiar y todas terminan cerradas',
         [e.estado.eventos.slice(0, iLimpiar).filter(x => x.startsWith('fin:')).length >= 3, todasCerradas(e.estado)], [true, true]);
       igual('los datos se crean solo con el bloqueo exigido', e.ejecucion.llamadas.exigirBloqueo >= 1, true);
-      igual('se crean exactamente dos cuentas temporales, ambas registradas como propias',
-        [e.estado.todas.filter(s => s.startsWith('INSERT INTO pansys_test.usuarios')).length, e.ejecucion.propios.usuarios.length, e.ejecucion.propios.panaderias.length], [2, 2, 2]);
+      igual('dos cuentas por SQL propio y, en V15, dos más y una panadería con las escrituras del módulo; todas propias',
+        [e.estado.todas.filter(s => s.startsWith('INSERT INTO pansys_test.usuarios')).length, e.ejecucion.propios.usuarios.length, e.ejecucion.propios.panaderias.length], [2, 4, 3]);
+      igual('V15: la administradora queda asignada a la panadería creada para ella',
+        Object.entries(e.estado.asignaciones).map(([c, p]) => [Number(c), p]), [[e.ejecucion.propios.usuarios[2], e.ejecucion.propios.panaderias[2]]]);
     }
     {
       const e = crearEscenario({ resultado: 'desconocido' });

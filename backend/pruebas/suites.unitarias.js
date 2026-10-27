@@ -185,7 +185,7 @@ const pruebasSuites = () => {
         [status, g?.peticiones?.length, g?.peticiones?.[0]?.url?.endsWith('/api/__aislamiento/0123456789abcdef'), g?.peticiones?.some(p => p.conToken)],
         [1, 1, true, false]);
       igual(`${archivo}, identidad ${identidad}: escrituras solo con las del módulo de aislamiento (ningún modelo, solo SELECT)`,
-        [g?.modelos, g && soloLecturas(g.consultas), orden.filter(e => e.startsWith('ejecucion:')).every(e => /^ejecucion:(iniciarEjecucion:|crearCuenta$|crearPanaderia$|crearProducto$|registrar$|exigirBloqueo$|limpiar$|cerrar$)/.test(e))],
+        [g?.modelos, g && soloLecturas(g.consultas), orden.filter(e => e.startsWith('ejecucion:')).every(e => /^ejecucion:(iniciarEjecucion:|crearCuenta$|crearPanaderia$|asignarPanaderia$|crearProducto$|registrar$|exigirBloqueo$|limpiar$|cerrar$)/.test(e))],
         [[], true, true]);
       const i = ['app:close', 'ejecucion:limpiar', 'ejecucion:cerrar', 'sequelize:close'].map(e => orden.indexOf(e));
       igual(`${archivo}, identidad ${identidad}: limpiar() y cerrar() exactamente una vez, en orden servidor -> limpiar -> cerrar -> Sequelize`,

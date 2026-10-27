@@ -44,6 +44,16 @@ const parsearId = (valor, campo) => {
   return id;
 };
 
+// Panadería autorizada de la petición (resolverPanaderia, desde la cuenta autenticada). Las
+// búsquedas por id siempre la incluyen: cualquier otro valor es un error interno y la consulta
+// no se envía (nunca se busca un registro sin filtrar por panadería).
+const exigirPanaderiaId = (panaderiaId) => {
+  if (!Number.isSafeInteger(panaderiaId) || panaderiaId <= 0) {
+    throw new Error('Consulta por id sin una panadería autorizada');
+  }
+  return panaderiaId;
+};
+
 const parsearEntero = (valor, campo, minimo, maximo) => {
   const texto = comoTexto(valor);
   const numero = Number(texto);
@@ -113,6 +123,7 @@ module.exports = {
   centavosATexto,
   diezmilesimasACentavos,
   parsearId,
+  exigirPanaderiaId,
   parsearEntero,
   parsearCantidad,
   parsearTexto,

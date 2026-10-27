@@ -32,19 +32,20 @@ const obtenerFormateado = async (id, transaction) =>
   formatear(await Usuario.findByPk(id, { attributes: ATRIBUTOS, include: INCLUDES, transaction }));
 
 // El rol del token puede estar desactualizado: la gestión de cuentas exige que quien
-// actúa sea, según la base de datos, un administrador activo
+// actúa sea, según la base de datos, un administrador activo de una panadería
 const exigirAdministradorActivo = (actor) => {
-  if (!actor || !actor.estado || actor.rol_id !== ROLES.ADMINISTRADOR) {
+  if (!actor || !actor.estado || actor.rol_id !== ROLES.ADMINISTRADOR || !actor.panaderia_id) {
     throw new ErrorNegocio('No tiene permisos para realizar esta acción', 403);
   }
 };
 
-// Bloquea (FOR UPDATE) a los administradores activos y devuelve sus id. Dos operaciones
-// que afecten a administradores quedan así en serie y no pueden dejar el sistema sin ninguno.
-const bloquearAdministradoresActivos = async (t) => {
+// Bloquea (FOR UPDATE) a los administradores activos de la panadería y devuelve sus id. Dos
+// operaciones que afecten a administradores de una panadería quedan así en serie y no pueden
+// dejarla sin ninguno.
+const bloquearAdministradoresActivos = async (t, panaderiaId) => {
   const filas = await Usuario.findAll({
     attributes: ['id'],
-    where: { rol_id: ROLES.ADMINISTRADOR, estado: true },
+    where: { rol_id: ROLES.ADMINISTRADOR, estado: true, panaderia_id: panaderiaId },
     lock: t.LOCK.UPDATE,
     transaction: t
   });
@@ -57,22 +58,46 @@ const asegurarOtroAdministradorActivo = (idsAdministradores, objetivoId) => {
   }
 };
 
-// Bloqueos siempre en el mismo orden: administradores activos, actor, cuenta objetivo
+// Bloqueos siempre en el mismo orden: administradores activos de la panadería, actor, cuenta
+// objetivo. La panadería del actor se lee primero sin bloqueo (para saber qué bloquear) y se
+// vuelve a comprobar con el actor ya bloqueado: si cambió entretanto, no se escribe nada (409).
+// Una cuenta de otra panadería no se encuentra (404), igual que una inexistente. La cuenta
+// objetivo también se lee antes sin bloqueo: si no es de la panadería, el 404 se responde sin
+// bloquear nada (ni una fila de otra panadería). Su pertenencia se vuelve a comprobar bloqueada.
 const prepararOperacion = async (t, actorId, objetivoId) => {
-  const administradores = await bloquearAdministradoresActivos(t);
+  const previo = await Usuario.findByPk(actorId, {
+    attributes: ['id', 'rol_id', 'panaderia_id', 'estado'], transaction: t
+  });
+  exigirAdministradorActivo(previo);
+  const panaderiaId = previo.panaderia_id;
+
+  const objetivoPrevio = objetivoId === actorId
+    ? previo
+    : await Usuario.findByPk(objetivoId, { attributes: ['id', 'panaderia_id'], transaction: t });
+  if (!objetivoPrevio || objetivoPrevio.panaderia_id !== panaderiaId) throw new ErrorNegocio('Cuenta no encontrada', 404);
+
+  const administradores = await bloquearAdministradoresActivos(t, panaderiaId);
 
   const actor = await Usuario.findByPk(actorId, {
-    attributes: ['id', 'rol_id', 'estado'], lock: t.LOCK.UPDATE, transaction: t
+    attributes: ['id', 'rol_id', 'panaderia_id', 'estado'], lock: t.LOCK.UPDATE, transaction: t
   });
   exigirAdministradorActivo(actor);
+  if (actor.panaderia_id !== panaderiaId) {
+    throw new ErrorNegocio('La cuenta cambió durante la operación. Inténtelo de nuevo.', 409);
+  }
 
   const objetivo = await Usuario.findByPk(objetivoId, {
     attributes: ['id', 'email', 'rol_id', 'panaderia_id', 'estado'], lock: t.LOCK.UPDATE, transaction: t
   });
-  if (!objetivo) throw new ErrorNegocio('Cuenta no encontrada', 404);
+  if (!objetivo || objetivo.panaderia_id !== panaderiaId) throw new ErrorNegocio('Cuenta no encontrada', 404);
 
-  return { administradores, objetivo };
+  return { administradores, objetivo, panaderiaId };
 };
+
+// panaderia_id en una edición: no se puede cambiar. Solo se admite el valor de la propia
+// panadería (la interfaz lo envía), que no tiene efecto.
+const esLaMismaPanaderia = (valor, panaderiaId) =>
+  (typeof valor === 'number' || (typeof valor === 'string' && valor.trim() !== '')) && Number(valor) === panaderiaId;
 
 const parsearRol = (valor) => {
   const rolId = typeof valor === 'number' || typeof valor === 'string' ? Number(valor) : NaN;
@@ -82,13 +107,15 @@ const parsearRol = (valor) => {
 
 class UsuariosService {
 
+  // Solo las cuentas de la panadería del administrador
   async listar(actorId) {
-    const actor = await Usuario.findByPk(actorId, { attributes: ['id', 'rol_id', 'estado'] });
+    const actor = await Usuario.findByPk(actorId, { attributes: ['id', 'rol_id', 'panaderia_id', 'estado'] });
     exigirAdministradorActivo(actor);
 
     const usuarios = await Usuario.findAll({
       attributes: ATRIBUTOS,
       include: INCLUDES,
+      where: { panaderia_id: actor.panaderia_id },
       order: [['estado', 'DESC'], ['email', 'ASC']]
     });
     return usuarios.map(formatear);
@@ -112,12 +139,14 @@ class UsuariosService {
     const email = datos.email !== undefined ? parsearEmail(datos.email) : undefined;
     const rolPedido = datos.rol_id !== undefined ? parsearRol(datos.rol_id) : undefined;
     const panaderiaEnviada = datos.panaderia_id !== undefined;
-    const panaderiaPedida = panaderiaEnviada && datos.panaderia_id !== null && datos.panaderia_id !== ''
-      ? parsearId(datos.panaderia_id, 'panaderia_id')
-      : null;
 
     return enTransaccion(sequelize, async (t) => {
-      const { administradores, objetivo } = await prepararOperacion(t, actorId, id);
+      const { administradores, objetivo, panaderiaId } = await prepararOperacion(t, actorId, id);
+
+      // La panadería de una cuenta no se cambia desde la administración
+      if (panaderiaEnviada && !esLaMismaPanaderia(datos.panaderia_id, panaderiaId)) {
+        throw new ErrorNegocio('Campos no editables: panaderia_id', 400);
+      }
 
       const rolFinal = rolPedido ?? objetivo.rol_id;
 
@@ -126,25 +155,12 @@ class UsuariosService {
         throw new ErrorNegocio('No puede cambiar su propio rol', 403);
       }
 
-      // El administrador general no pertenece a una panadería; los demás roles sí
-      let panaderiaFinal;
-      if (rolFinal === ROLES.ADMINISTRADOR) {
-        if (panaderiaPedida !== null) {
-          throw new ErrorNegocio('El administrador general no se asigna a una panadería', 400);
-        }
-        panaderiaFinal = null;
-      } else {
-        panaderiaFinal = panaderiaEnviada ? panaderiaPedida : objetivo.panaderia_id;
-        if (panaderiaFinal === null) {
-          throw new ErrorNegocio('Debe indicar una panadería válida para este rol', 400);
-        }
-        if (panaderiaFinal !== objetivo.panaderia_id || panaderiaEnviada) {
-          const panaderia = await Panaderia.findByPk(panaderiaFinal, { attributes: ['id'], transaction: t });
-          if (!panaderia) throw new ErrorNegocio('Panadería no encontrada', 404);
-        }
+      // Ninguna cuenta pasa a ser administradora desde la administración
+      if (rolFinal === ROLES.ADMINISTRADOR && objetivo.rol_id !== ROLES.ADMINISTRADOR) {
+        throw new ErrorNegocio('No tiene permisos para asignar el rol de administrador', 403);
       }
 
-      // Degradar a un administrador activo exige que quede otro
+      // Degradar a un administrador activo exige que quede otro en su panadería
       if (objetivo.estado && objetivo.rol_id === ROLES.ADMINISTRADOR && rolFinal !== ROLES.ADMINISTRADOR) {
         asegurarOtroAdministradorActivo(administradores, id);
       }
@@ -156,8 +172,7 @@ class UsuariosService {
 
       await objetivo.update({
         ...(email !== undefined && { email }),
-        rol_id: rolFinal,
-        panaderia_id: panaderiaFinal
+        rol_id: rolFinal
       }, { transaction: t });
 
       return obtenerFormateado(id, t);
