@@ -6,7 +6,12 @@ import api from './api';
 
 // Cliente HTTP REAL (axios con sus interceptores) y AuthProvider REAL. Solo se sustituye el
 // adaptador de red de axios por respuestas simuladas con los códigos que devuelve el backend.
-jest.mock('react-router-dom', () => ({ useNavigate: () => jest.fn() }));
+// Login usa useNavigate, useLocation (aviso tras restablecer la contraseña) y Link (enlace a /recuperar)
+jest.mock('react-router-dom', () => ({
+  useNavigate: () => jest.fn(),
+  useLocation: () => ({ pathname: '/login', state: null }),
+  Link: ({ to, children, ...props }) => require('react').createElement('a', { href: to, ...props }, children)
+}));
 
 const USUARIO = { id: 2, email: 'panadero@pansys.com', rol: 'panadero', rol_id: 2, panaderia_id: 1 };
 const adaptadorOriginal = api.defaults.adapter;
