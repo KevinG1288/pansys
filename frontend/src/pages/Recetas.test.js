@@ -10,8 +10,18 @@ jest.mock('../services/api', () => ({
   default: { get: jest.fn(), post: jest.fn(), put: jest.fn(), patch: jest.fn(), delete: jest.fn() }
 }));
 
-const URL_RECETAS = '/api/produccion/recetas?panaderia_id=1';
-const URL_MATERIAS = '/api/inventario?panaderia_id=1';
+// Ninguna petición envía panaderia_id: el backend usa siempre la panadería de la cuenta autenticada
+afterEach(() => {
+  for (const llamadas of Object.values(api).map(f => f?.mock?.calls ?? [])) {
+    for (const [url, cuerpo] of llamadas) {
+      expect(String(url)).not.toMatch(/panaderia_id/);
+      if (cuerpo && typeof cuerpo === 'object') expect(cuerpo).not.toHaveProperty('panaderia_id');
+    }
+  }
+});
+
+const URL_RECETAS = '/api/produccion/recetas';
+const URL_MATERIAS = '/api/inventario';
 const PANADERO = { id: 2, email: 'panadero@pansys.com', rol: 'panadero', rol_id: 2, panaderia_id: 1 };
 const GERENTE = { id: 4, email: 'gerente@pansys.com', rol: 'gerente', rol_id: 3, panaderia_id: 1 };
 
@@ -88,7 +98,7 @@ describe('Crear y editar', () => {
     userEvent.click(screen.getByRole('button', { name: 'Crear receta' }));
 
     expect(await screen.findByText('Receta de «Torta» creada.')).toBeInTheDocument();
-    expect(api.post).toHaveBeenCalledWith('/api/produccion/recetas/2?panaderia_id=1', {
+    expect(api.post).toHaveBeenCalledWith('/api/produccion/recetas/2', {
       insumos: [
         { materia_prima_id: 8, cantidad_por_unidad: 0.5 },
         { materia_prima_id: 7, cantidad_por_unidad: 1 }
@@ -111,7 +121,7 @@ describe('Crear y editar', () => {
     userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
 
     expect(await screen.findByText('Receta de «Pan» actualizada.')).toBeInTheDocument();
-    expect(api.put).toHaveBeenCalledWith('/api/produccion/recetas/1?panaderia_id=1', {
+    expect(api.put).toHaveBeenCalledWith('/api/produccion/recetas/1', {
       insumos: [{ materia_prima_id: 7, cantidad_por_unidad: 0.2 }]
     });
     expect(api.post).not.toHaveBeenCalled();
@@ -160,7 +170,7 @@ describe('Eliminar', () => {
     userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Eliminar' }));
 
     expect(await screen.findByText(/Receta de «Pan» eliminada/)).toBeInTheDocument();
-    expect(api.delete).toHaveBeenCalledWith('/api/produccion/recetas/1?panaderia_id=1');
+    expect(api.delete).toHaveBeenCalledWith('/api/produccion/recetas/1');
     await waitFor(() => expect(llamadasA(URL_RECETAS)).toBe(2));
   });
 });

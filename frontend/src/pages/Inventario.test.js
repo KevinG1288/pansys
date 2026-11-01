@@ -10,7 +10,17 @@ jest.mock('../services/api', () => ({
   default: { get: jest.fn(), post: jest.fn(), put: jest.fn(), delete: jest.fn() }
 }));
 
-const URL_LISTADO = '/api/inventario?panaderia_id=1';
+// Ninguna petición envía panaderia_id: el backend usa siempre la panadería de la cuenta autenticada
+afterEach(() => {
+  for (const llamadas of Object.values(api).map(f => f?.mock?.calls ?? [])) {
+    for (const [url, cuerpo] of llamadas) {
+      expect(String(url)).not.toMatch(/panaderia_id/);
+      if (cuerpo && typeof cuerpo === 'object') expect(cuerpo).not.toHaveProperty('panaderia_id');
+    }
+  }
+});
+
+const URL_LISTADO = '/api/inventario';
 const PANADERO = { id: 2, email: 'panadero@pansys.com', rol: 'panadero', rol_id: 2, panaderia_id: 1 };
 const GERENTE = { id: 4, email: 'gerente@pansys.com', rol: 'gerente', rol_id: 3, panaderia_id: 1 };
 
@@ -182,8 +192,7 @@ describe('Crear insumo', () => {
       unidad_medida: 'kg',
       cantidad_disponible: 12.5,
       stock_minimo: 2,
-      precio_unitario: 1500,
-      panaderia_id: 1
+      precio_unitario: 1500
     });
     expect(await screen.findByText('«Sal marina» se agregó al inventario.')).toBeInTheDocument();
     expect(api.get).toHaveBeenCalledTimes(2);
@@ -261,8 +270,7 @@ describe('Editar insumo', () => {
       unidad_medida: 'kg',
       cantidad_disponible: 12.5,
       stock_minimo: 2,
-      precio_unitario: 3000,
-      panaderia_id: 1
+      precio_unitario: 3000
     });
     expect(api.post).not.toHaveBeenCalled();
     expect(await screen.findByText('«Harina de trigo» se actualizó correctamente.')).toBeInTheDocument();
@@ -295,8 +303,7 @@ describe('Precisión DECIMAL(12,4) de cantidades y precio', () => {
       unidad_medida: 'ml',
       cantidad_disponible: 99999999.9999,
       stock_minimo: 0.0001,
-      precio_unitario: 12.3456,
-      panaderia_id: 1
+      precio_unitario: 12.3456
     });
   });
 

@@ -13,8 +13,7 @@ import StatCard from '../components/ui/StatCard';
 import FormularioInsumo from '../components/inventario/FormularioInsumo';
 import TablaInsumos, { estadoInsumo } from '../components/inventario/TablaInsumos';
 
-// Panadería con la que trabaja la interfaz (para panadero y gerente el backend usa la del token)
-const PANADERIA_ID = 1;
+// La panadería no se envía: el backend usa siempre la de la cuenta autenticada
 const ID_AVISO_CONSULTA = 'aviso-modo-consulta-inventario';
 
 const Inventario = () => {
@@ -33,7 +32,7 @@ const Inventario = () => {
   const cargarInventario = useCallback(async () => {
     setErrorCarga(null);
     try {
-      const res = await api.get(`/api/inventario?panaderia_id=${PANADERIA_ID}`);
+      const res = await api.get('/api/inventario');
       setInsumos(res.data);
     } catch (error) {
       setErrorCarga(mensajeError(error, 'No se pudo cargar el inventario.'));
@@ -65,7 +64,7 @@ const Inventario = () => {
 
   // Recibe los datos ya validados y convertidos por FormularioInsumo; los errores los muestra el formulario
   const guardarInsumo = async (datos) => {
-    const cuerpo = { ...datos, panaderia_id: PANADERIA_ID };
+    const cuerpo = datos;
     const editando = Boolean(formulario.insumo);
     if (editando) {
       await api.put(`/api/inventario/${formulario.insumo.id}`, cuerpo);

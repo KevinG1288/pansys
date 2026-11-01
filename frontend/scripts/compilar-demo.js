@@ -7,6 +7,8 @@
 // REACT_APP_API_URL='/' tiene prioridad sobre frontend/.env (localhost:3000), que sigue sirviendo
 // para el desarrollo con `npm start`. Se fija aquí porque PowerShell no permite definir una
 // variable de entorno vacía. axios combina '/' + '/api/x' en '/api/x'.
+// GENERATE_SOURCEMAP='false': sin mapas de código fuente (.map). El backend sirve frontend/build
+// tal cual, y un .map expondría el código fuente completo a quien abra la demo.
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -17,7 +19,7 @@ const BUILD = path.join(RAIZ, 'build');
 const r = spawnSync(process.execPath, [require.resolve('react-scripts/bin/react-scripts.js'), 'build'], {
   cwd: RAIZ,
   stdio: 'inherit',
-  env: { ...process.env, REACT_APP_API_URL: '/' }
+  env: { ...process.env, REACT_APP_API_URL: '/', GENERATE_SOURCEMAP: 'false' }
 });
 if (r.status !== 0) {
   console.error('La compilación falló.');
@@ -37,6 +39,20 @@ if (!fs.existsSync(path.join(BUILD, 'index.html')) || archivos.length === 0) {
 }
 if (conDireccionFija.length > 0) {
   console.error(`El build contiene una dirección fija (localhost o IP) en: ${conDireccionFija.join(', ')}`);
+  process.exit(1);
+}
+// Ningún mapa de código fuente en todo el build
+const mapas = [];
+const buscarMapas = (dir) => {
+  for (const entrada of fs.readdirSync(dir, { withFileTypes: true })) {
+    const ruta = path.join(dir, entrada.name);
+    if (entrada.isDirectory()) buscarMapas(ruta);
+    else if (entrada.name.endsWith('.map')) mapas.push(path.relative(BUILD, ruta));
+  }
+};
+buscarMapas(BUILD);
+if (mapas.length > 0) {
+  console.error(`El build contiene mapas de código fuente: ${mapas.join(', ')}`);
   process.exit(1);
 }
 console.log('\nBuild de la demo listo: la API se llama con rutas relativas (/api/...).');

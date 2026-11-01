@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { BookOpenText, ChefHat, Eye, EyeOff, LogIn, Package, ShoppingBasket } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
@@ -39,6 +39,9 @@ const Login = () => {
   const refContrasena = useRef(null);
   const { login, avisoSesion } = useAuth();
   const navigate = useNavigate();
+  // Aviso de la pantalla de restablecimiento (contraseña cambiada); solo texto, nunca el token
+  const avisoNavegacion = useLocation()?.state?.aviso;
+  const avisoRestablecimiento = typeof avisoNavegacion === 'string' ? avisoNavegacion : null;
 
   useEffect(() => {
     refEmail.current?.focus();
@@ -117,7 +120,8 @@ const Login = () => {
             <p className="mt-1 text-sm text-muted-foreground">Usa la cuenta que te asignó el administrador.</p>
 
             <form onSubmit={handleSubmit} noValidate className="mt-6 flex flex-col gap-4">
-              {avisoSesion && !error && <Aviso tipo="info" titulo="Tu sesión terminó">{avisoSesion}</Aviso>}
+              {avisoRestablecimiento && !error && <Aviso tipo="exito" titulo="Contraseña restablecida">{avisoRestablecimiento}</Aviso>}
+              {avisoSesion && !error && !avisoRestablecimiento && <Aviso tipo="info" titulo="Tu sesión terminó">{avisoSesion}</Aviso>}
               {error && <Aviso tipo="error">{error}</Aviso>}
               <Campo
                 ref={refEmail}
@@ -156,6 +160,9 @@ const Login = () => {
                 {errores.contrasena && (
                   <p id={idErrorContrasena} className="text-xs font-medium text-destructive">{errores.contrasena}</p>
                 )}
+                <Link to="/recuperar" className="self-end text-xs font-medium text-primary hover:underline">
+                  ¿Olvidaste tu contraseña?
+                </Link>
               </div>
               <Boton type="submit" cargando={cargando} className="mt-2 w-full">
                 {!cargando && <LogIn className="size-4" aria-hidden="true" />}

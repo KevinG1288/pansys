@@ -6,6 +6,8 @@ const { validarContrasenaNueva } = require('../../utils/contrasenas');
 const { parsearEmail } = require('../../utils/email');
 const { enTransaccion } = require('../../utils/transaccion');
 const { firmarSesion } = require('../../utils/sesion');
+// Enlaces de restablecimiento (SQL 005): se invocan por el objeto para poder sustituirlos en pruebas
+const restablecimientos = require('./restablecimiento.repositorio');
 
 class AuthService {
 
@@ -109,6 +111,10 @@ class AuthService {
 
       const version = usuario.version_sesion + 1;
       await usuario.update({ contrasena: hashNuevo, version_sesion: version }, { transaction: t });
+      // Mismo COMMIT: los enlaces de restablecimiento pendientes de la cuenta quedan invalidados
+      await restablecimientos.invalidarPendientes(t, {
+        usuarioId: usuario.id, motivo: 'contrasena_cambiada', actorId: usuario.id, panaderiaId: usuario.panaderia_id
+      });
       const rol = await Rol.findByPk(usuario.rol_id, { attributes: ['nombre'], transaction: t });
 
       // Solo los datos necesarios para firmar (sin el hash): el token aún NO se firma aquí

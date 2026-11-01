@@ -10,9 +10,19 @@ jest.mock('../services/api', () => ({
   default: { get: jest.fn(), post: jest.fn(), put: jest.fn(), patch: jest.fn(), delete: jest.fn() }
 }));
 
-const URL_ORDENES = '/api/produccion/ordenes?panaderia_id=1';
-const URL_RECETAS = '/api/produccion/recetas?panaderia_id=1';
-const URL_DETALLE_5 = '/api/produccion/ordenes/5?panaderia_id=1';
+// Ninguna petición envía panaderia_id: el backend usa siempre la panadería de la cuenta autenticada
+afterEach(() => {
+  for (const llamadas of Object.values(api).map(f => f?.mock?.calls ?? [])) {
+    for (const [url, cuerpo] of llamadas) {
+      expect(String(url)).not.toMatch(/panaderia_id/);
+      if (cuerpo && typeof cuerpo === 'object') expect(cuerpo).not.toHaveProperty('panaderia_id');
+    }
+  }
+});
+
+const URL_ORDENES = '/api/produccion/ordenes';
+const URL_RECETAS = '/api/produccion/recetas';
+const URL_DETALLE_5 = '/api/produccion/ordenes/5';
 const PANADERO = { id: 2, email: 'panadero@pansys.com', rol: 'panadero', rol_id: 2, panaderia_id: 1 };
 const GERENTE = { id: 4, email: 'gerente@pansys.com', rol: 'gerente', rol_id: 3, panaderia_id: 1 };
 
@@ -140,14 +150,14 @@ describe('Nueva orden', () => {
     userEvent.click(screen.getByRole('button', { name: 'Calcular insumos' }));
 
     expect(await screen.findByText('Hay insumos suficientes')).toBeInTheDocument();
-    expect(api.get).toHaveBeenCalledWith('/api/produccion/calcular?producto_id=1&cantidad=40&panaderia_id=1');
+    expect(api.get).toHaveBeenCalledWith('/api/produccion/calcular?producto_id=1&cantidad=40');
     expect(screen.getByRole('table', { name: 'Insumos necesarios' })).toHaveTextContent(/Harina/);
 
     userEvent.click(screen.getByRole('button', { name: 'Crear orden' }));
 
     expect(await screen.findByText(/Orden #6 creada: 40 × Pan/)).toBeInTheDocument();
     expect(api.post).toHaveBeenCalledTimes(1);
-    expect(api.post).toHaveBeenCalledWith('/api/produccion/ordenes', { producto_id: 1, cantidad_planificada: 40, panaderia_id: 1 });
+    expect(api.post).toHaveBeenCalledWith('/api/produccion/ordenes', { producto_id: 1, cantidad_planificada: 40 });
     expect(screen.getByText(/Quedaron en su stock mínimo o por debajo: Harina \(1 kg\)/)).toBeInTheDocument();
     await waitFor(() => expect(llamadasA(URL_ORDENES)).toBe(2));
   });
@@ -200,7 +210,7 @@ describe('Finalizar', () => {
     userEvent.click(within(dialogo).getByRole('button', { name: 'Finalizar orden' }));
 
     expect(await screen.findByText(/Orden #5 finalizada: 38 unidades/)).toBeInTheDocument();
-    expect(api.patch).toHaveBeenCalledWith('/api/produccion/ordenes/5/finalizar?panaderia_id=1', { cantidad_producida: 38 });
+    expect(api.patch).toHaveBeenCalledWith('/api/produccion/ordenes/5/finalizar', { cantidad_producida: 38 });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await waitFor(() => expect(llamadasA(URL_ORDENES)).toBe(2));
   });
@@ -238,7 +248,7 @@ describe('Cancelar', () => {
     userEvent.click(within(dialogo).getByRole('button', { name: 'Cancelar orden' }));
 
     expect(await screen.findByText(/Orden #5 cancelada. Los insumos indicados volvieron/)).toBeInTheDocument();
-    expect(api.patch).toHaveBeenCalledWith('/api/produccion/ordenes/5/cancelar?panaderia_id=1', { motivo: 'Masa dañada', devolver_insumos: true });
+    expect(api.patch).toHaveBeenCalledWith('/api/produccion/ordenes/5/cancelar', { motivo: 'Masa dañada', devolver_insumos: true });
   });
 
   test('no devolver: { motivo, devolver_insumos: false } y el motivo es obligatorio', async () => {
@@ -255,7 +265,7 @@ describe('Cancelar', () => {
     userEvent.click(within(dialogo).getByRole('button', { name: 'Cancelar orden' }));
 
     expect(await screen.findByText(/se registraron como merma/)).toBeInTheDocument();
-    expect(api.patch).toHaveBeenCalledWith('/api/produccion/ordenes/5/cancelar?panaderia_id=1', { motivo: 'Pedido anulado', devolver_insumos: false });
+    expect(api.patch).toHaveBeenCalledWith('/api/produccion/ordenes/5/cancelar', { motivo: 'Pedido anulado', devolver_insumos: false });
   });
 
   test('devolución parcial: envía el detalle por insumo y no permite devolver más de lo descontado', async () => {
@@ -279,7 +289,7 @@ describe('Cancelar', () => {
     userEvent.click(within(dialogo).getByRole('button', { name: 'Cancelar orden' }));
 
     await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
-    expect(api.patch).toHaveBeenCalledWith('/api/produccion/ordenes/5/cancelar?panaderia_id=1', {
+    expect(api.patch).toHaveBeenCalledWith('/api/produccion/ordenes/5/cancelar', {
       motivo: 'Se quemó una parte',
       devolver_insumos: true,
       insumos: [{ materia_prima_id: 7, cantidad_devuelta: 2.5 }]

@@ -9,6 +9,16 @@ jest.mock('../services/api', () => ({
   default: { get: jest.fn() }
 }));
 
+// Ninguna petición envía panaderia_id: el backend usa siempre la panadería de la cuenta autenticada
+afterEach(() => {
+  for (const llamadas of Object.values(api).map(f => f?.mock?.calls ?? [])) {
+    for (const [url, cuerpo] of llamadas) {
+      expect(String(url)).not.toMatch(/panaderia_id/);
+      if (cuerpo && typeof cuerpo === 'object') expect(cuerpo).not.toHaveProperty('panaderia_id');
+    }
+  }
+});
+
 const AHORA = new Date().toISOString();
 const HACE_DOS_DIAS = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -38,10 +48,10 @@ const ORDENES = [
 ];
 
 const RESPUESTAS = {
-  '/api/inventario?panaderia_id=1': INSUMOS,
-  '/api/ventas?panaderia_id=1': VENTAS,
-  '/api/ventas/productos?panaderia_id=1': PRODUCTOS,
-  '/api/produccion/ordenes?panaderia_id=1': ORDENES
+  '/api/inventario': INSUMOS,
+  '/api/ventas': VENTAS,
+  '/api/ventas/productos': PRODUCTOS,
+  '/api/produccion/ordenes': ORDENES
 };
 
 const simularGet = (fallos = {}) => {
@@ -95,7 +105,7 @@ test('lista alertas, órdenes en proceso, más vendidos de hoy y últimas ventas
 });
 
 test('si una fuente falla, lo indica y el resto del resumen sigue visible; Reintentar vuelve a cargar', async () => {
-  simularGet({ '/api/ventas?panaderia_id=1': 'Error de prueba en ventas' });
+  simularGet({ '/api/ventas': 'Error de prueba en ventas' });
   render(<ResumenDashboard onIrA={jest.fn()} />);
 
   expect(await screen.findByRole('alert')).toHaveTextContent('Error de prueba en ventas');

@@ -1,4 +1,4 @@
-// Verificación de pruebas/aislamiento.js contra MySQL real (hipótesis V1-V15 del plan). Escribe
+// Verificación de pruebas/aislamiento.js contra MySQL real (hipótesis V1-V16 del plan). Escribe
 // SOLO filas propias en pansys_test, marcadas con su runId, y las borra únicamente mediante
 // ejecucion.limpiar(). Si la limpieza no termina en "limpia", se detiene: no reintenta ni borra
 // por otra vía, e indica qué comprobar a mano.
@@ -21,6 +21,9 @@
 //    que siempre termina en ROLLBACK (no queda ningún cambio); V15 asigna a una administradora
 //    propia la panadería propia de la que es propietaria (asignarPanaderia, una sola fila); y
 //    limpiar() desasigna esa panadería antes de retirar las filas, dentro de su transacción.
+//  - V16 (requiere las tablas del SQL 005): inserta eventos de seguridad y enlaces de
+//    restablecimiento de cuentas propias, y desvincula con UPDATE el actor de un evento y el
+//    solicitante de un enlace, ambos propios. limpiar() los retira con el resto.
 //  - Las inserciones que V6 y V12 intentan contra filas bloqueadas deben fallar por tiempo de
 //    espera (1205); si alguna llegara a escribirse, es propia y la limpieza la incluye.
 //  - Los contadores AUTO_INCREMENT de las tablas avanzan de forma permanente, aunque la limpieza
@@ -63,6 +66,28 @@ const LECTURA_SESION = 'SELECT @@SESSION.transaction_isolation AS aislamiento, @
 const INSERTAR_MATERIA = "INSERT INTO pansys_test.materia_prima (nombre, unidad_medida, cantidad_disponible, stock_minimo, precio_unitario, panaderia_id, estado, createdAt, updatedAt) VALUES (?, 'kg', 1, 0, 1, ?, 1, NOW(), NOW())";
 const INSERTAR_VENTA = "INSERT INTO pansys_test.ventas (fecha, total, empleado_id, panaderia_id, estado, createdAt, updatedAt) VALUES (CURDATE(), 1, ?, ?, 'completada', NOW(), NOW())";
 const INSERTAR_DETALLE = 'INSERT INTO pansys_test.detalle_ventas (venta_id, producto_id, cantidad, precio_unitario, subtotal, createdAt, updatedAt) VALUES (?, ?, 1, 1, 1, NOW(), NOW())';
+// V16: tablas del SQL 005. El evento no lleva enlace (tipo email_cambiado) y el token_hash es el
+// SHA-256 de un texto marcado con el runId, calculado en MySQL (nunca un token real).
+const TABLAS_RECUPERACION = ['eventos_seguridad', 'restablecimientos_contrasena'];
+const INSERTAR_EVENTO = "INSERT INTO pansys_test.eventos_seguridad (tipo, usuario_id, panaderia_id, actor_id, restablecimiento_id, detalle, createdAt) VALUES ('email_cambiado', ?, ?, ?, NULL, ?, NOW())";
+const INSERTAR_ENLACE = "INSERT INTO pansys_test.restablecimientos_contrasena (usuario_id, origen, solicitado_por, token_hash, estado, expira_en, createdAt, updatedAt) VALUES (?, ?, ?, SHA2(?, 256), 'enviando', DATE_ADD(NOW(), INTERVAL 30 MINUTE), NOW(), NOW())";
+const DESVINCULAR_EVENTO = 'UPDATE pansys_test.eventos_seguridad SET actor_id = NULL WHERE id = ? AND usuario_id = ? AND actor_id = ?';
+const DESVINCULAR_ENLACE = "UPDATE pansys_test.restablecimientos_contrasena SET origen = 'propio', solicitado_por = NULL, updatedAt = NOW() WHERE id = ? AND usuario_id = ? AND solicitado_por = ?";
+const CONTAR_EVENTOS = 'SELECT COUNT(*) AS n FROM pansys_test.eventos_seguridad WHERE usuario_id IN (?) OR actor_id IN (?)';
+const CONTAR_ENLACES = 'SELECT COUNT(*) AS n FROM pansys_test.restablecimientos_contrasena WHERE usuario_id IN (?) OR solicitado_por IN (?)';
+const DESASIGNADAS = 'usuarios (propietarias desasignadas)';
+
+// Recuentos previstos en el orden exacto en que limpiar() los devuelve: primero la desasignación
+// (si la hubo) y después cada paso de pasosDeBorrado, con 0 en los pasos sin filas previstas.
+// Devuelve null si algún recuento previsto no corresponde a ningún paso (no se puede comparar).
+const ordenarPrevistos = (previstos, pasos) => {
+  const orden = [DESASIGNADAS, ...pasos.map(p => p.descripcion)];
+  if (Object.keys(previstos).some(clave => !orden.includes(clave))) return null;
+  const resultado = {};
+  if (DESASIGNADAS in previstos) resultado[DESASIGNADAS] = previstos[DESASIGNADAS];
+  for (const paso of pasos) resultado[paso.descripcion] = previstos[paso.descripcion] ?? 0;
+  return resultado;
+};
 
 class ErrorVerificacion extends Error {
   constructor(mensaje) {
@@ -175,6 +200,8 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
   };
   let limpiezaCorrecta = false;
   let previstos = null;
+  let tablasRecuperacion = [];
+  let v16Ejecutada = false;
   // true en cuanto se intenta la primera escritura de datos (antes de enviarla: cubre también una
   // escritura de resultado incierto). Si sigue en false, la verificación se detuvo sin crear datos.
   let escrituraIntentada = false;
@@ -208,6 +235,10 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
       [BASE, ['usuarios', 'panaderias']]);
     informe.comprobar('V10', 'el alias de information_schema devuelve la columna "tabla"',
       tablas.length === 2 && tablas.every(f => typeof f.tabla === 'string'), JSON.stringify(Object.keys(tablas[0] ?? {})));
+    // Tablas del SQL 005 presentes (solo lectura): fijan los pasos de limpiar() y si V16 se ejecuta
+    tablasRecuperacion = (await consultar(aux, 'SELECT TABLE_NAME AS tabla FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN (?)',
+      [BASE, TABLAS_RECUPERACION])).map(f => f.tabla).filter(t => TABLAS_RECUPERACION.includes(t)).sort();
+    informe.nota(`tablas del SQL 005 presentes: ${tablasRecuperacion.length ? tablasRecuperacion.join(', ') : 'ninguna'}`);
 
     // ---------- V14: nivel de aislamiento y tiempo de espera de la sesión (solo lectura) ----------
     // La conexión auxiliar se abre con la misma configuración que la dedicada de aislamiento.js y
@@ -388,6 +419,84 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
     informe.comprobar('V15', 'la administradora queda asignada a la panadería de la que es propietaria',
       Number(asignada?.panaderia_id) === panC && Number(asignada?.rol_id) === 1, `panaderia_id = ${asignada?.panaderia_id ?? '(sin fila)'}`);
 
+    // ---------- V16: dependencias mixtas en las tablas del SQL 005 ----------
+    // El bloqueo de suite impide dos ejecuciones simultáneas (V2) y limpiar() solo se ejecuta una
+    // vez: una limpieza abortada deja sus filas para revisión manual. Por eso, como en V11, la
+    // segunda ejecución se representa con un grupo de cuentas propias disjunto: X e Y son
+    // administradoras propias sin panadería, y cada una hace de ajena para la otra. Se comprueba
+    // con comprobarAntesDeBorrar, la misma comprobación que limpiar() hace dentro de su transacción
+    // antes del primer borrado; solo lee. Después de desvincular con UPDATE las referencias
+    // cruzadas, ambos grupos quedan sin dependencias mixtas y la limpieza única lo retira todo.
+    if (tablasRecuperacion.length !== TABLAS_RECUPERACION.length) {
+      informe.comprobar('V16', 'las tablas del SQL 005 existen en pansys_test', false, `presentes: ${tablasRecuperacion.join(', ') || 'ninguna'}`);
+    } else {
+      await ejecucion.exigirBloqueo();
+      const cuentaX = await ejecucion.crearCuenta({ etiqueta: 'v16x', rol: 'administrador', activa: false });
+      previstos['usuarios (propietarias)'] += 1;
+      const cuentaY = await ejecucion.crearCuenta({ etiqueta: 'v16y', rol: 'administrador', activa: false });
+      previstos['usuarios (propietarias)'] += 1;
+      const evento = async (usuario, panaderia, actor, paso) => {
+        const id = await insertar(INSERTAR_EVENTO, [usuario, panaderia, actor, ejecucion.nombre('V16')]);
+        previstos[`eventos_seguridad (${paso})`] = (previstos[`eventos_seguridad (${paso})`] ?? 0) + 1;
+        return id;
+      };
+      const enlace = async (usuario, solicitante, paso) => {
+        const id = await insertar(INSERTAR_ENLACE, [usuario, solicitante === null ? 'propio' : 'administrador', solicitante, ejecucion.nombre(`V16 enlace ${usuario}`)]);
+        previstos[`restablecimientos_contrasena (${paso})`] = (previstos[`restablecimientos_contrasena (${paso})`] ?? 0) + 1;
+        return id;
+      };
+      // Cruzadas entre X e Y (se limpian como "sin actor" y "sin solicitante" tras desvincularlas)
+      const eventoCruzado = await evento(cuentaX, null, cuentaY, 'sin actor ni panadería');
+      const enlaceCruzado = await enlace(cuentaX, cuentaY, 'sin solicitante');
+      // Una fila por cada paso restante de limpiar() en estas tablas
+      await evento(cuentaY, null, cuentaY, 'actor propio, sin panadería');
+      await evento(empleado, panA, null, 'sin actor, panadería propia');
+      await evento(empleado, panA, admin, 'actor propio, panadería propia');
+      await enlace(empleado, admin, 'solicitante propio');
+      v16Ejecutada = true;
+
+      const contarFilas = async () => {
+        const ids = [cuentaX, cuentaY, empleado, admin];
+        const [e] = await consultar(aux, CONTAR_EVENTOS, [ids, ids]);
+        const [r] = await consultar(aux, CONTAR_ENLACES, [ids, ids]);
+        return [Number(e?.n), Number(r?.n)];
+      };
+      const filasAntes = await contarFilas();
+      informe.comprobar('V16', 'filas creadas en las tablas del SQL 005 (4 eventos y 2 enlaces)',
+        JSON.stringify(filasAntes) === '[4,2]', `eventos/enlaces = ${filasAntes.join('/')}`);
+      // Error de la comprobación previa de limpiar() con un solo grupo como propio
+      const comprobarGrupo = async (cuenta) => {
+        try {
+          await ejecucion.comprobarAntesDeBorrar({ usuarios: [cuenta], panaderias: [] });
+          return null;
+        } catch (error) {
+          return error instanceof ErrorAislamiento ? error.message : `inesperado: ${codigoDe(error)}`;
+        }
+      };
+      const esperarMixta = async (cuenta, grupo, descripcion) => {
+        const mensaje = await comprobarGrupo(cuenta);
+        informe.comprobar('V16', `con solo ${grupo} como propio, la limpieza aborta: ${descripcion}`,
+          mensaje === `Dependencia mixta: 1 ${descripcion}`, mensaje ?? 'no abortó');
+      };
+      await esperarMixta(cuentaX, 'X', 'evento de una cuenta propia con un actor ajeno');
+      await esperarMixta(cuentaY, 'Y', 'evento de una cuenta ajena con un actor propio');
+
+      const desvincular = async (sql, params, descripcion) => {
+        const resultado = await escribir(datos, 'datos', sql, params);
+        informe.comprobar('V16', descripcion, resultado?.affectedRows === 1, `affectedRows = ${resultado?.affectedRows}`);
+      };
+      await desvincular(DESVINCULAR_EVENTO, [eventoCruzado, cuentaX, cuentaY], 'el UPDATE desvincula el actor del evento cruzado (1 fila)');
+      await esperarMixta(cuentaX, 'X', 'enlace de una cuenta propia solicitado por una cuenta ajena');
+      await esperarMixta(cuentaY, 'Y', 'enlace de una cuenta ajena solicitado por una cuenta propia');
+
+      await desvincular(DESVINCULAR_ENLACE, [enlaceCruzado, cuentaX, cuentaY], 'el UPDATE desvincula el solicitante del enlace cruzado (1 fila)');
+      const sinMixtas = [await comprobarGrupo(cuentaX), await comprobarGrupo(cuentaY)];
+      informe.comprobar('V16', 'tras desvincular, ni X ni Y tienen dependencias mixtas', sinMixtas.every(m => m === null), sinMixtas.join(' | '));
+      const filasDespues = await contarFilas();
+      informe.comprobar('V16', 'las comprobaciones abortadas no retiraron ninguna fila',
+        JSON.stringify(filasDespues) === JSON.stringify(filasAntes), `eventos/enlaces = ${filasDespues.join('/')}`);
+    }
+
     // ---------- V3: al destruir una conexión, MySQL suelta sus bloqueos (con un bloqueo aparte) ----------
     const v3 = await abrirConexion(crearConexion, env, 'v3');
     const eventos = [];
@@ -429,14 +538,24 @@ const ejecutar = async ({ env = process.env, crearConexion = crearConexionMysql,
         Object.keys(limpieza.borrados ?? {}).length === 0, JSON.stringify(limpieza.borrados));
     } else {
       limpiezaCorrecta = true;
+      // Con las tablas del SQL 005, limpiar() informa también de sus pasos (0 si no había filas)
+      const esperados = previstos === null ? null
+        : ordenarPrevistos(previstos, ejecucion.pasosDeBorrado(tablasRecuperacion, { usuarios: ejecucion.ids('usuarios'), panaderias: ejecucion.ids('panaderias') }));
       informe.comprobar('V5', 'limpiar() borra lo propio con los recuentos previstos',
-        previstos !== null && JSON.stringify(limpieza.borrados) === JSON.stringify(previstos), JSON.stringify(limpieza.borrados));
+        esperados !== null && JSON.stringify(limpieza.borrados) === JSON.stringify(esperados), JSON.stringify(limpieza.borrados));
       try {
         const comprobacion = await abrir('comprobacion');
-        const [u] = await consultar(comprobacion, 'SELECT COUNT(*) AS n FROM pansys_test.usuarios WHERE id IN (?)', [ejecucion.ids('usuarios').length ? ejecucion.ids('usuarios') : [0]]);
+        const usuariosPropios = ejecucion.ids('usuarios').length ? ejecucion.ids('usuarios') : [0];
+        const [u] = await consultar(comprobacion, 'SELECT COUNT(*) AS n FROM pansys_test.usuarios WHERE id IN (?)', [usuariosPropios]);
         const [p] = await consultar(comprobacion, 'SELECT COUNT(*) AS n FROM pansys_test.panaderias WHERE id IN (?)', [ejecucion.ids('panaderias').length ? ejecucion.ids('panaderias') : [0]]);
         const [pr] = await consultar(comprobacion, 'SELECT COUNT(*) AS n FROM pansys_test.productos WHERE panaderia_id IN (?)', [ejecucion.ids('panaderias').length ? ejecucion.ids('panaderias') : [0]]);
         informe.comprobar('V5', 'tras la limpieza no queda ninguna fila propia', [u, p, pr].every(f => Number(f?.n) === 0));
+        if (v16Ejecutada) {
+          const [e] = await consultar(comprobacion, CONTAR_EVENTOS, [usuariosPropios, usuariosPropios]);
+          const [r] = await consultar(comprobacion, CONTAR_ENLACES, [usuariosPropios, usuariosPropios]);
+          informe.comprobar('V16', 'tras la limpieza no queda ningún evento ni enlace de las cuentas propias',
+            Number(e?.n) === 0 && Number(r?.n) === 0, `eventos/enlaces = ${e?.n}/${r?.n}`);
+        }
       } catch (error) {
         informe.comprobar('V5', 'comprobación posterior a la limpieza', false, codigoDe(error));
       } finally {

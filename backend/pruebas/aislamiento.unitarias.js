@@ -50,10 +50,12 @@ const FKS = [
   ['orden_produccion', 'panaderia_id', 'panaderias', 'RESTRICT'],
   ['insumo_usado', 'orden_id', 'orden_produccion', 'RESTRICT'],
   ['insumo_usado', 'materia_prima_id', 'materia_prima', 'RESTRICT'],
+  // SQL 005 propuesto: todas RESTRICT (los CHECK y las columnas generadas lo exigen)
   ['eventos_seguridad', 'usuario_id', 'usuarios', 'RESTRICT'],
   ['eventos_seguridad', 'actor_id', 'usuarios', 'RESTRICT'],
-  ['restablecimientos_contrasena', 'usuario_id', 'usuarios', 'CASCADE'],
-  ['restablecimientos_contrasena', 'solicitado_por', 'usuarios', 'SET NULL']
+  ['eventos_seguridad', 'panaderia_id', 'panaderias', 'RESTRICT'],
+  ['restablecimientos_contrasena', 'usuario_id', 'usuarios', 'RESTRICT'],
+  ['restablecimientos_contrasena', 'solicitado_por', 'usuarios', 'RESTRICT']
 ];
 
 const copiar = (valor) => JSON.parse(JSON.stringify(valor));
@@ -88,6 +90,10 @@ const filtrar = (db, nombreTabla, where, params) => {
     if ((m = condicion.match(/^(\w+) IS NOT NULL$/))) {
       const col = m[1];
       return f => f[col] !== null && f[col] !== undefined;
+    }
+    if ((m = condicion.match(/^(\w+) IS NULL$/))) {
+      const col = m[1];
+      return f => f[col] === null || f[col] === undefined;
     }
     if ((m = condicion.match(/^(\w+) (NOT IN|IN) \(SELECT (\w+) FROM pansys_test\.(\w+) WHERE (\w+) IN \(\?\)\)$/))) {
       const [, col, op, colSeleccion, madre, colMadre] = m;
@@ -290,7 +296,8 @@ const dbBase = ({ opcionales = false } = {}) => {
     insumo_usado: [{ id: 1, orden_id: 1, materia_prima_id: 1 }]
   };
   if (opcionales) {
-    db.eventos_seguridad = [{ id: 1, usuario_id: 5, actor_id: 1 }];
+    // Ajenos: una cuenta de la demo (5) en la panadería 1, con actor y solicitante ajenos (1)
+    db.eventos_seguridad = [{ id: 1, usuario_id: 5, actor_id: 1, panaderia_id: 1 }];
     db.restablecimientos_contrasena = [{ id: 1, usuario_id: 5, solicitado_por: 1 }];
   }
   return db;
@@ -316,8 +323,16 @@ const crearPropios = (servidor, ej, { opcionales = false } = {}) => {
   db.ventas.push({ id: 80, panaderia_id: 20 });
   db.detalle_ventas.push({ id: 90, venta_id: 80, producto_id: 40 });
   if (opcionales) {
-    db.eventos_seguridad.push({ id: 2, usuario_id: 11, actor_id: 10 }, { id: 3, usuario_id: 12, actor_id: 1 });
-    db.restablecimientos_contrasena.push({ id: 2, usuario_id: 11, solicitado_por: 10 });
+    // Propios y limpios: actor, solicitante y panadería NULL o propios (sin dependencias mixtas)
+    db.eventos_seguridad.push(
+      { id: 2, usuario_id: 11, actor_id: 10, panaderia_id: 20 },
+      { id: 3, usuario_id: 12, actor_id: null, panaderia_id: 21 },
+      { id: 4, usuario_id: 10, actor_id: null, panaderia_id: null }
+    );
+    db.restablecimientos_contrasena.push(
+      { id: 2, usuario_id: 11, solicitado_por: 10 },
+      { id: 3, usuario_id: 12, solicitado_por: null }
+    );
   }
   [10, 11, 12].forEach(id => ej.registrar('usuarios', id));
   [20, 21].forEach(id => ej.registrar('panaderias', id));
@@ -533,12 +548,100 @@ const main = async () => {
     igual('segunda limpieza -> rechazada sin consultas nuevas', [repetida.ok, /ya está hecha/.test(repetida.motivo)], [false, true]);
     await ej.cerrar();
   }
+  // ---------- Tablas de recuperación (SQL 005): caso limpio, ausentes y dependencias mixtas ----------
+  console.log('\n== Tablas de recuperación (SQL 005)');
+  // Filas borradas de una tabla, sumando sus pasos («tabla (caso)»)
+  const sumaBorrados = (borrados, nombre) => Object.entries(borrados)
+    .filter(([clave]) => clave === nombre || clave.startsWith(`${nombre} (`))
+    .reduce((total, [, n]) => total + n, 0);
+  const RECUPERACION = /pansys_test\.(eventos_seguridad|restablecimientos_contrasena) /;
   {
-    const { servidor, ej, ajenos } = await preparar({ opcionales: true });
+    const { servidor, ej, ajenos, conexion } = await preparar({ opcionales: true });
     const limpieza = await ej.limpiar();
-    igual('con las tablas del SQL 005: borra eventos y enlaces propios y conserva los ajenos',
-      [limpieza.ok, JSON.stringify(servidor.db) === JSON.stringify(ajenos), limpieza.borrados.eventos_seguridad, limpieza.borrados.restablecimientos_contrasena],
-      [true, true, 2, 1]);
+    igual('caso limpio: borra los eventos y enlaces propios (actor, solicitante o panadería NULL o propios) y los ajenos quedan idénticos',
+      [limpieza.ok, JSON.stringify(servidor.db) === JSON.stringify(ajenos),
+        sumaBorrados(limpieza.borrados, 'eventos_seguridad'), sumaBorrados(limpieza.borrados, 'restablecimientos_contrasena')],
+      [true, true, 3, 2]);
+    const borradosRecuperacion = sentencias(conexion, 'DELETE').filter(s => RECUPERACION.test(s));
+    igual('caso limpio: 6 DELETE sobre esas tablas, todos solo con AND (sin OR entre columnas de cuenta)',
+      [borradosRecuperacion.length, borradosRecuperacion.some(s => /\sOR\s/.test(s))], [6, false]);
+    const deletes = sentencias(conexion, 'DELETE');
+    const iUltimoRecuperacion = deletes.reduce((ultimo, s, i) => (RECUPERACION.test(s) ? i : ultimo), -1);
+    igual('caso limpio: esas tablas se borran antes que las cuentas y las panaderías',
+      iUltimoRecuperacion < deletes.findIndex(s => /pansys_test\.(usuarios|panaderias) /.test(s)), true);
+    // Comprobación del código: los pasos de borrado de esas dos tablas (con y sin panaderías propias)
+    // solo usan AND; no se prohíbe OR en otros lugares legítimos del módulo
+    for (const panaderiasPropias of [[20, 21], []]) {
+      const pasos = ej.pasosDeBorrado(['eventos_seguridad', 'restablecimientos_contrasena'], { usuarios: [10, 11, 12], panaderias: panaderiasPropias })
+        .filter(p => p.tabla === 'eventos_seguridad' || p.tabla === 'restablecimientos_contrasena');
+      igual(`pasosDeBorrado (${panaderiasPropias.length ? 'con' : 'sin'} panaderías propias): sin OR, siempre con usuario_id IN (?) y con tantos parámetros como «?»`,
+        [pasos.length, pasos.some(p => /\bOR\b/i.test(p.where)), pasos.every(p => p.where.startsWith('usuario_id IN (?) AND ')),
+          pasos.every(p => (p.where.match(/\?/g) ?? []).length === p.params.length)],
+        [panaderiasPropias.length ? 6 : 4, false, true, true]);
+    }
+    await ej.cerrar();
+  }
+  {
+    const { servidor, ej, ajenos, conexion } = await preparar();
+    const limpieza = await ej.limpiar();
+    const mencionan = conexion.registro.filter(s => /eventos_seguridad|restablecimientos_contrasena/.test(s));
+    igual('sin las tablas del SQL 005: limpieza correcta, ajenos idénticos y ninguna sentencia sobre ellas',
+      [limpieza.ok, JSON.stringify(servidor.db) === JSON.stringify(ajenos), mencionan], [true, true, []]);
+    await ej.cerrar();
+  }
+  // Cada dependencia mixta aborta ANTES de cualquier escritura: ROLLBACK y base idéntica (estado completo)
+  const mixta = async (descripcion, modificar, patronMotivo) => {
+    const { servidor, ej, conexion } = await preparar({ opcionales: true });
+    modificar(servidor.db);
+    const antes = copiar(servidor.db);
+    const limpieza = await ej.limpiar();
+    igual(`${descripcion} -> revertida con el motivo de la dependencia mixta`,
+      [limpieza.ok, limpieza.resultado, patronMotivo.test(limpieza.motivo ?? '')], [false, 'revertida', true]);
+    igual(`${descripcion} -> base simulada completa idéntica a la de antes de limpiar`,
+      JSON.stringify(servidor.db) === JSON.stringify(antes), true);
+    igual(`${descripcion} -> sin DELETE ni COMMIT, con ROLLBACK, nada borrado y lo propio pendiente de revisión`,
+      [sentencias(conexion, 'DELETE').length, conexion.registro.includes('COMMIT'), conexion.registro.includes('ROLLBACK'),
+        limpieza.borrados, limpieza.pendientes?.usuarios, ej.estado], [0, false, true, {}, [10, 11, 12], 'abortada']);
+    await ej.cerrar();
+  };
+  await mixta('evento de una cuenta propia con un actor ajeno',
+    (db) => { db.eventos_seguridad.push({ id: 10, usuario_id: 11, actor_id: 1, panaderia_id: 20 }); },
+    /Dependencia mixta: 1 evento de una cuenta propia con un actor ajeno/);
+  await mixta('evento de una cuenta ajena con un actor propio',
+    (db) => { db.eventos_seguridad.push({ id: 11, usuario_id: 5, actor_id: 10, panaderia_id: 1 }); },
+    /Dependencia mixta: 1 evento de una cuenta ajena con un actor propio/);
+  await mixta('evento de una cuenta propia en una panadería ajena',
+    (db) => { db.eventos_seguridad.push({ id: 12, usuario_id: 11, actor_id: 10, panaderia_id: 1 }); },
+    /Dependencia mixta: 1 evento de una cuenta propia en una panadería ajena/);
+  await mixta('evento de una cuenta ajena en una panadería propia',
+    (db) => { db.eventos_seguridad.push({ id: 13, usuario_id: 5, actor_id: null, panaderia_id: 20 }); },
+    /Dependencia mixta: 1 evento de una cuenta ajena en una panadería propia/);
+  await mixta('enlace de una cuenta propia solicitado por una cuenta ajena',
+    (db) => { db.restablecimientos_contrasena.push({ id: 10, usuario_id: 11, solicitado_por: 1 }); },
+    /Dependencia mixta: 1 enlace de una cuenta propia solicitado por una cuenta ajena/);
+  await mixta('enlace de una cuenta ajena solicitado por una cuenta propia',
+    (db) => { db.restablecimientos_contrasena.push({ id: 11, usuario_id: 5, solicitado_por: 10 }); },
+    /Dependencia mixta: 1 enlace de una cuenta ajena solicitado por una cuenta propia/);
+  // E3 sin panaderías propias: una cuenta propia (sin panadería) con un evento en una panadería
+  // ajena. Con la lista de panaderías vacía, cualquier panadería no nula es ajena (IS NOT NULL).
+  {
+    const { servidor, ej, conexion } = await preparar({ opcionales: true, propios: false });
+    servidor.db.usuarios.push({ id: 10, email: ej.correo('admin'), panaderia_id: null });
+    ej.registrar('usuarios', 10);
+    servidor.db.eventos_seguridad.push({ id: 20, usuario_id: 10, actor_id: null, panaderia_id: 1 });
+    const antes = copiar(servidor.db);
+    const limpieza = await ej.limpiar();
+    igual('E3 sin panaderías propias -> revertida por dependencia mixta (cuenta propia en una panadería ajena)',
+      [limpieza.ok, limpieza.resultado, /Dependencia mixta: 1 evento de una cuenta propia en una panadería ajena/.test(limpieza.motivo ?? '')],
+      [false, 'revertida', true]);
+    igual('E3 sin panaderías propias -> se usó la variante IS NOT NULL (sin NOT IN sobre una lista vacía)',
+      conexion.registro.includes('SELECT COUNT(*) AS n FROM pansys_test.eventos_seguridad WHERE usuario_id IN (?) AND panaderia_id IS NOT NULL'), true);
+    igual('E3 sin panaderías propias -> base simulada completa idéntica a la de antes de limpiar',
+      JSON.stringify(servidor.db) === JSON.stringify(antes), true);
+    igual('E3 sin panaderías propias -> sin UPDATE, DELETE ni COMMIT, con ROLLBACK, nada borrado y la cuenta pendiente',
+      [sentencias(conexion, 'UPDATE').length, sentencias(conexion, 'DELETE').length, conexion.registro.includes('COMMIT'),
+        conexion.registro.includes('ROLLBACK'), limpieza.borrados, limpieza.pendientes?.usuarios, limpieza.pendientes?.panaderias, ej.estado],
+      [0, 0, false, true, {}, [10], [], 'abortada']);
     await ej.cerrar();
   }
   {

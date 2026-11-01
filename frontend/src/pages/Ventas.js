@@ -13,8 +13,7 @@ import FormularioProducto from '../components/ventas/FormularioProducto';
 import HistorialVentas from '../components/ventas/HistorialVentas';
 import PuntoVenta from '../components/ventas/PuntoVenta';
 
-// Panadería con la que trabaja la interfaz (para panadero y gerente el backend usa la del token)
-const PANADERIA_ID = 1;
+// La panadería no se envía: el backend usa siempre la de la cuenta autenticada
 // Se mantiene el contrato actual del POST; el backend ignora este valor y usa el usuario del token
 const EMPLEADO_ID = 1;
 const ID_AVISO_CONSULTA = 'aviso-modo-consulta-ventas';
@@ -35,7 +34,7 @@ const Ventas = () => {
   const cargarVentas = useCallback(async () => {
     setErrorVentas(null);
     try {
-      const res = await api.get(`/api/ventas?panaderia_id=${PANADERIA_ID}`);
+      const res = await api.get('/api/ventas');
       setVentas(res.data);
     } catch (error) {
       setErrorVentas(mensajeError(error, 'No se pudieron cargar las ventas.'));
@@ -45,7 +44,7 @@ const Ventas = () => {
   const cargarProductos = useCallback(async () => {
     setErrorProductos(null);
     try {
-      const res = await api.get(`/api/ventas/productos?panaderia_id=${PANADERIA_ID}`);
+      const res = await api.get('/api/ventas/productos');
       setProductos(res.data);
     } catch (error) {
       setErrorProductos(mensajeError(error, 'No se pudieron cargar los productos.'));
@@ -79,7 +78,6 @@ const Ventas = () => {
     try {
       const res = await api.post('/api/ventas', {
         empleado_id: EMPLEADO_ID,
-        panaderia_id: PANADERIA_ID,
         productos: carrito.map(c => ({ producto_id: c.producto_id, cantidad: c.cantidad }))
       });
       setAviso({ tipo: 'exito', texto: `Venta #${res.data.id} registrada por ${formatCOP(res.data.total)}.` });
@@ -92,7 +90,7 @@ const Ventas = () => {
   };
 
   const crearProducto = async (datos) => {
-    await api.post('/api/ventas/productos', { ...datos, panaderia_id: PANADERIA_ID });
+    await api.post('/api/ventas/productos', datos);
     setMostrarFormProducto(false);
     setAviso({ tipo: 'exito', texto: `Producto «${datos.nombre}» creado.` });
     await cargarProductos();

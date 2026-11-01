@@ -9,6 +9,8 @@ const DetalleVenta = require('./DetalleVenta');
 const RecetaProducto = require('./RecetaProducto');
 const OrdenProduccion = require('./OrdenProduccion');
 const InsumoUsado = require('./InsumoUsado');
+const RestablecimientoContrasena = require('./RestablecimientoContrasena');
+const EventoSeguridad = require('./EventoSeguridad');
 
 // Relaciones
 Rol.hasMany(Usuario, { foreignKey: 'rol_id' });
@@ -70,5 +72,7 @@ module.exports = {
   DetalleVenta,
   RecetaProducto,
   OrdenProduccion,
-  InsumoUsado
+  InsumoUsado,
+  RestablecimientoContrasena,
+  EventoSeguridad
 };

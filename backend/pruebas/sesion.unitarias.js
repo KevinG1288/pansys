@@ -62,8 +62,12 @@ const pruebasCambioContrasena = async () => {
   console.log('\n== cambiarContrasena: orden transacción -> COMMIT -> firma');
   const { sequelize, Usuario, Rol } = require('../src/models/index');
   const authService = require('../src/modules/auth/auth.service');
+  const restablecimientos = require('../src/modules/auth/restablecimiento.repositorio');
 
-  const originales = { transaction: sequelize.transaction, findOne: Usuario.findOne, findByPk: Rol.findByPk, sign: jwt.sign };
+  const originales = {
+    transaction: sequelize.transaction, findOne: Usuario.findOne, findByPk: Rol.findByPk, sign: jwt.sign,
+    invalidarPendientes: restablecimientos.invalidarPendientes
+  };
   const hashActual = await bcrypt.hash('Actual123', 4);
 
   // Estado simulado de la fila y registro de eventos en orden
@@ -75,6 +79,7 @@ const pruebasCambioContrasena = async () => {
 
   const preparar = ({ version = 0, plan = ['ok'], falloRol = false, existe = true } = {}) => {
     eventos = [];
+    invalidaciones = [];
     enBase = { version_sesion: version, contrasena: hashActual, existe };
     pendiente = null;
     planIntentos = [...plan];
@@ -126,6 +131,13 @@ const pruebasCambioContrasena = async () => {
     if (rolFalla) throw new Error('Fallo simulado dentro de la transacción');
     return { nombre: 'panadero' };
   };
+  // Los enlaces de restablecimiento pendientes se invalidan en la MISMA transacción (antes del COMMIT)
+  let invalidaciones;
+  restablecimientos.invalidarPendientes = async (t, datos) => {
+    eventos.push(`invalidar:${datos.motivo}${t ? '' : ':FUERA DE LA TRANSACCION'}`);
+    invalidaciones.push(datos);
+    return 0;
+  };
   jwt.sign = (...args) => {
     eventos.push(`firma:v${args[0].version_sesion}`);
     return originales.sign.apply(jwt, args);
@@ -138,8 +150,10 @@ const pruebasCambioContrasena = async () => {
     // 1. Éxito: la firma va después del COMMIT y lleva la versión confirmada
     preparar({ version: 0 });
     const exito = await cambiar();
-    igual('éxito: lectura con bloqueo, escritura, COMMIT y DESPUÉS la firma',
-      eventos, ['lectura:FOR UPDATE', 'escritura:v1', 'commit', 'firma:v1']);
+    igual('éxito: lectura con bloqueo, escritura, invalidación de enlaces, COMMIT y DESPUÉS la firma',
+      eventos, ['lectura:FOR UPDATE', 'escritura:v1', 'invalidar:contrasena_cambiada', 'commit', 'firma:v1']);
+    igual('éxito: se invalidan los enlaces pendientes de la propia cuenta, con ella como actor y su panadería',
+      invalidaciones, [{ usuarioId: 9, motivo: 'contrasena_cambiada', actorId: 9, panaderiaId: 1 }]);
     igual('éxito: la respuesta solo tiene mensaje y token', Object.keys(exito.r ?? {}).sort(), ['mensaje', 'token']);
     igual('éxito: el token lleva la versión confirmada (1)', jwt.verify(exito.r.token, process.env.JWT_SECRET).version_sesion, 1);
     igual('éxito: la versión confirmada en la base es 1 y el hash cambió',
@@ -159,7 +173,8 @@ const pruebasCambioContrasena = async () => {
     preparar({ version: 0, plan: ['deadlock', 'ok'] });
     const reintento = await cambiar();
     igual('deadlock: se reintenta y solo se firma tras el COMMIT del segundo intento',
-      eventos, ['lectura:FOR UPDATE', 'escritura:v1', 'rollback-deadlock', 'lectura:FOR UPDATE', 'escritura:v2', 'commit', 'firma:v2']);
+      eventos, ['lectura:FOR UPDATE', 'escritura:v1', 'invalidar:contrasena_cambiada', 'rollback-deadlock',
+        'lectura:FOR UPDATE', 'escritura:v2', 'invalidar:contrasena_cambiada', 'commit', 'firma:v2']);
     igual('deadlock: exactamente una firma', eventos.filter(e => e.startsWith('firma')).length, 1);
     igual('deadlock: el token lleva la versión confirmada (2), no la del intento deshecho',
       jwt.verify(reintento.r.token, process.env.JWT_SECRET).version_sesion, 2);
@@ -169,12 +184,12 @@ const pruebasCambioContrasena = async () => {
     preparar({ version: 0, falloRol: true });
     const fallaDentro = await cambiar();
     igual('error dentro de la transacción: escritura deshecha y ninguna firma',
-      [fallaDentro.ok, eventos, enBase.version_sesion], [false, ['lectura:FOR UPDATE', 'escritura:v1', 'rollback'], 0]);
+      [fallaDentro.ok, eventos, enBase.version_sesion], [false, ['lectura:FOR UPDATE', 'escritura:v1', 'invalidar:contrasena_cambiada', 'rollback'], 0]);
 
     // 5. Contraseña actual incorrecta: 400, sin escritura ni firma
     preparar({ version: 0 });
     const incorrecta = await authService.cambiarContrasena(9, 'Equivocada1', 'Nueva12345').then(r => ({ ok: true, r }), e => ({ ok: false, e }));
-    igual('contraseña actual incorrecta: 400, sin escritura ni firma',
+    igual('contraseña actual incorrecta: 400, sin escritura, invalidación ni firma',
       [incorrecta.ok, incorrecta.e?.status, eventos], [false, 400, ['lectura:FOR UPDATE', 'rollback']]);
 
     // 6. Cuenta inexistente o desactivada: 404, sin firma
@@ -192,6 +207,7 @@ const pruebasCambioContrasena = async () => {
     Usuario.findOne = originales.findOne;
     Rol.findByPk = originales.findByPk;
     jwt.sign = originales.sign;
+    restablecimientos.invalidarPendientes = originales.invalidarPendientes;
   }
 };
 

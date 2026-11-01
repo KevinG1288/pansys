@@ -13,15 +13,14 @@ import StatusBadge from '../components/ui/StatusBadge';
 import { Tabla, TablaCelda, TablaColumna, TablaCuerpo, TablaEncabezado, TablaFila } from '../components/ui/Tabla';
 import { estadoInsumo } from '../components/inventario/TablaInsumos';
 
-// Panadería con la que trabaja la interfaz (para panadero y gerente el backend usa la del token)
-const PANADERIA_ID = 1;
+// La panadería no se envía: el backend usa siempre la de la cuenta autenticada
 
 // Endpoints de lectura existentes (permitidos a los tres roles)
 const FUENTES = {
-  insumos: `/api/inventario?panaderia_id=${PANADERIA_ID}`,
-  ventas: `/api/ventas?panaderia_id=${PANADERIA_ID}`,
-  productos: `/api/ventas/productos?panaderia_id=${PANADERIA_ID}`,
-  ordenes: `/api/produccion/ordenes?panaderia_id=${PANADERIA_ID}`
+  insumos: '/api/inventario',
+  ventas: '/api/ventas',
+  productos: '/api/ventas/productos',
+  ordenes: '/api/produccion/ordenes'
 };
 
 const lineasDe = (venta) => venta.DetalleVenta ?? venta.DetalleVentas ?? [];

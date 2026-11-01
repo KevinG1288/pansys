@@ -1,5 +1,5 @@
 const { Sequelize } = require('sequelize');
-require('dotenv').config();
+require('./entorno'); // única carga de variables (.env, o .env.produccion con --entorno=produccion)
 
 const sequelize = new Sequelize(
   process.env.DB_NAME,

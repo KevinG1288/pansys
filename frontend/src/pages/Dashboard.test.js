@@ -15,15 +15,25 @@ jest.mock('../services/api', () => ({
   default: { get: jest.fn(), post: jest.fn(), put: jest.fn(), patch: jest.fn(), delete: jest.fn() }
 }));
 
+// Ninguna petición envía panaderia_id: el backend usa siempre la panadería de la cuenta autenticada
+afterEach(() => {
+  for (const llamadas of Object.values(api).map(f => f?.mock?.calls ?? [])) {
+    for (const [url, cuerpo] of llamadas) {
+      expect(String(url)).not.toMatch(/panaderia_id/);
+      if (cuerpo && typeof cuerpo === 'object') expect(cuerpo).not.toHaveProperty('panaderia_id');
+    }
+  }
+});
+
 const ADMIN = { id: 1, email: 'admin@pansys.com', rol: 'administrador', rol_id: 1, panaderia_id: null };
 const PANADERO = { id: 2, email: 'panadero@pansys.com', rol: 'panadero', rol_id: 2, panaderia_id: 1 };
 const MODULOS = ['Dashboard', 'Inventario', 'Ventas', 'Producción', 'Recetas', 'Red colaborativa'];
 const AVISO_PENDIENTE = 'Este módulo todavía no está disponible en la interfaz.';
 const URLS_PORTADA = [
-  '/api/inventario?panaderia_id=1',
-  '/api/ventas?panaderia_id=1',
-  '/api/ventas/productos?panaderia_id=1',
-  '/api/produccion/ordenes?panaderia_id=1'
+  '/api/inventario',
+  '/api/ventas',
+  '/api/ventas/productos',
+  '/api/produccion/ordenes'
 ];
 
 const INSUMOS = [
@@ -143,7 +153,7 @@ describe('Estructura y navegación', () => {
     userEvent.click(within(menuEscritorio()).getByRole('button', { name: 'Producción' }));
     expect(screen.getByRole('heading', { level: 1, name: 'Producción' })).toBeInTheDocument();
     expect(await screen.findByText('Aún no hay órdenes de producción')).toBeInTheDocument();
-    expect(api.get).toHaveBeenCalledWith('/api/produccion/recetas?panaderia_id=1');
+    expect(api.get).toHaveBeenCalledWith('/api/produccion/recetas');
 
     userEvent.click(within(menuEscritorio()).getByRole('button', { name: 'Recetas' }));
     expect(screen.getByRole('heading', { level: 1, name: 'Recetas' })).toBeInTheDocument();

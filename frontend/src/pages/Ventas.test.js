@@ -10,8 +10,18 @@ jest.mock('../services/api', () => ({
   default: { get: jest.fn(), post: jest.fn(), put: jest.fn(), delete: jest.fn() }
 }));
 
-const URL_VENTAS = '/api/ventas?panaderia_id=1';
-const URL_PRODUCTOS = '/api/ventas/productos?panaderia_id=1';
+// Ninguna petición envía panaderia_id: el backend usa siempre la panadería de la cuenta autenticada
+afterEach(() => {
+  for (const llamadas of Object.values(api).map(f => f?.mock?.calls ?? [])) {
+    for (const [url, cuerpo] of llamadas) {
+      expect(String(url)).not.toMatch(/panaderia_id/);
+      if (cuerpo && typeof cuerpo === 'object') expect(cuerpo).not.toHaveProperty('panaderia_id');
+    }
+  }
+});
+
+const URL_VENTAS = '/api/ventas';
+const URL_PRODUCTOS = '/api/ventas/productos';
 const PANADERO = { id: 2, email: 'panadero@pansys.com', rol: 'panadero', rol_id: 2, panaderia_id: 1 };
 const GERENTE = { id: 4, email: 'gerente@pansys.com', rol: 'gerente', rol_id: 3, panaderia_id: 1 };
 
@@ -191,7 +201,6 @@ describe('Punto de venta y carrito', () => {
     expect(api.post).toHaveBeenCalledTimes(1);
     expect(api.post).toHaveBeenCalledWith('/api/ventas', {
       empleado_id: 1,
-      panaderia_id: 1,
       productos: [
         { producto_id: 1, cantidad: 2 },
         { producto_id: 2, cantidad: 1 }
@@ -257,8 +266,7 @@ describe('Alta de producto', () => {
       nombre: 'Pan de queso',
       precio_compra: 800,
       precio_venta: 1500.5,
-      cantidad_disponible: 10,
-      panaderia_id: 1
+      cantidad_disponible: 10
     });
     await waitFor(() => expect(llamadasA(URL_PRODUCTOS)).toBe(2));
     expect(screen.queryByRole('button', { name: 'Guardar producto' })).not.toBeInTheDocument();

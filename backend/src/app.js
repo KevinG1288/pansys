@@ -1,8 +1,9 @@
 const express = require('express');
 const cors = require('cors');
-require('dotenv').config();
+const entorno = require('./config/entorno'); // única carga de variables (.env, o .env.produccion con --entorno=produccion)
 
 const { sequelize } = require('./models/index');
+const { leerConfiguracionCorreo, describirCorreo } = require('./utils/correo');
 const { leerOpciones, montarFrontend, iniciarServidor, ErrorArranque } = require('./config/arranque');
 const authRoutes = require('./modules/auth/auth.routes');
 const inventarioRoutes = require('./modules/inventario/inventario.routes');
@@ -40,6 +41,9 @@ if (opciones.servirFrontend) {
 // En modo demo, además, se comprueba que la base sea pansys_test antes de aceptar peticiones.
 iniciarServidor({ app, sequelize, opciones })
   .then(() => {
+    console.log(`Entorno: ${entorno.nombre} (${entorno.archivo})`);
+    // Modo de correo sin secretos (ya validado antes de conectar, en config/arranque.js)
+    console.log(`Correo: ${describirCorreo(leerConfiguracionCorreo())}`);
     console.log('Conexión a la base de datos verificada ✅');
     if (opciones.modoDemo) console.log('Modo demo: base pansys_test verificada ✅');
     if (opciones.servirFrontend) console.log(`Sirviendo el frontend compilado desde ${opciones.dirFrontend} ✅`);

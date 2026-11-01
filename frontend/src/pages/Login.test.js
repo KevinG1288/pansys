@@ -4,9 +4,15 @@ import { AuthProvider, useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import Login from './Login';
 
-// Jest 27 (CRA 5) no resuelve el subpath 'react-router/dom' de react-router 7: solo se sustituye useNavigate
+// Jest 27 (CRA 5) no resuelve el subpath 'react-router/dom' de react-router 7: se sustituyen
+// useNavigate, useLocation (estado de la navegación) y Link (un <a> con su destino)
 const mockNavigate = jest.fn();
-jest.mock('react-router-dom', () => ({ useNavigate: () => mockNavigate }));
+let mockEstadoNavegacion = null;
+jest.mock('react-router-dom', () => ({
+  useNavigate: () => mockNavigate,
+  useLocation: () => ({ pathname: '/login', state: mockEstadoNavegacion }),
+  Link: ({ to, children, ...props }) => require('react').createElement('a', { href: to, ...props }, children)
+}));
 
 // Sin red: la API se sustituye por funciones simuladas. AuthProvider y login() son los reales.
 jest.mock('../services/api', () => ({
@@ -45,6 +51,26 @@ const entrar = () => userEvent.click(screen.getByRole('button', { name: 'Iniciar
 
 afterEach(() => {
   localStorage.clear();
+  mockEstadoNavegacion = null;
+});
+
+test('muestra el enlace «¿Olvidaste tu contraseña?» hacia /recuperar sin enviar nada al backend', () => {
+  renderizar();
+  const enlace = screen.getByRole('link', { name: '¿Olvidaste tu contraseña?' });
+  expect(enlace).toHaveAttribute('href', '/recuperar');
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test('tras un restablecimiento muestra el aviso que llega por la navegación (solo texto)', () => {
+  mockEstadoNavegacion = { aviso: 'Contraseña restablecida. Inicie sesión con la contraseña nueva.' };
+  renderizar();
+  expect(screen.getByRole('status')).toHaveTextContent('Contraseña restablecida. Inicie sesión con la contraseña nueva.');
+});
+
+test('un estado de navegación que no es texto no muestra ningún aviso', () => {
+  mockEstadoNavegacion = { aviso: { html: '<b>x</b>' } };
+  renderizar();
+  expect(screen.queryByRole('status')).toBeNull();
 });
 
 test('inicia sesión con el contrato real, guarda el token y el usuario, y navega al dashboard', async () => {

@@ -4,6 +4,8 @@ const { ErrorNegocio } = require('../../utils/errores');
 const { enTransaccion } = require('../../utils/transaccion');
 const { parsearId } = require('../produccion/produccion.validaciones');
 const { parsearEmail } = require('../../utils/email');
+// Enlaces de restablecimiento (SQL 005): se invocan por el objeto para poder sustituirlos en pruebas
+const restablecimientos = require('../auth/restablecimiento.repositorio');
 
 const CAMPOS_EDITABLES = ['email', 'rol_id', 'panaderia_id'];
 
@@ -170,10 +172,18 @@ class UsuariosService {
         if (existe && existe.id !== id) throw new ErrorNegocio('El email ya está registrado', 409);
       }
 
+      const emailCambia = email !== undefined && email !== objetivo.email;
       await objetivo.update({
         ...(email !== undefined && { email }),
         rol_id: rolFinal
       }, { transaction: t });
+
+      // Cambio de correo: en la misma transacción (cuenta ya bloqueada), los enlaces pendientes
+      // quedan invalidados y se registra el evento (sin las direcciones)
+      if (emailCambia) {
+        await restablecimientos.invalidarPendientes(t, { usuarioId: id, motivo: 'email_cambiado', actorId, panaderiaId });
+        await restablecimientos.registrarEvento(t, { tipo: 'email_cambiado', usuarioId: id, panaderiaId, actorId });
+      }
 
       return obtenerFormateado(id, t);
     });
@@ -187,7 +197,7 @@ class UsuariosService {
     }
 
     return enTransaccion(sequelize, async (t) => {
-      const { administradores, objetivo } = await prepararOperacion(t, actorId, id);
+      const { administradores, objetivo, panaderiaId } = await prepararOperacion(t, actorId, id);
 
       if (id === actorId) {
         throw new ErrorNegocio('No puede cambiar el estado de su propia cuenta', 403);
@@ -204,6 +214,10 @@ class UsuariosService {
           estado,
           ...(!estado && { version_sesion: sequelize.literal('version_sesion + 1') })
         }, { transaction: t });
+        // Desactivar invalida también los enlaces de restablecimiento pendientes
+        if (!estado) {
+          await restablecimientos.invalidarPendientes(t, { usuarioId: id, motivo: 'cuenta_desactivada', actorId, panaderiaId });
+        }
       }
 
       return obtenerFormateado(id, t);

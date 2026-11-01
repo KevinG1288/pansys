@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Pencil, Power, RefreshCw, UserPlus, Users } from 'lucide-react';
+import { KeyRound, Pencil, Power, RefreshCw, UserPlus, Users } from 'lucide-react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { mensajeError } from '../lib/errores';
@@ -15,17 +15,22 @@ import Selector from '../components/ui/Selector';
 import StatusBadge from '../components/ui/StatusBadge';
 import { Tabla, TablaCelda, TablaColumna, TablaCuerpo, TablaEncabezado, TablaFila } from '../components/ui/Tabla';
 import DialogoEditarCuenta from '../components/cuentas/DialogoEditarCuenta';
-import { nombreRol, OPCIONES_ROL } from '../components/cuentas/roles';
+import DialogoRestablecer from '../components/cuentas/DialogoRestablecer';
+import { nombreRol, OPCIONES_ROL, ROLES_ASIGNABLES } from '../components/cuentas/roles';
 
 // La política de contraseñas vive en lib/validacion.js (se reexporta por compatibilidad)
 export { validarContrasena };
 
-const VACIO = { email: '', contrasena: '', confirmacion: '', rol_id: String(ROLES.PANADERO), panaderia_id: '' };
+const VACIO = { email: '', contrasena: '', confirmacion: '', rol_id: String(ROLES.PANADERO) };
 
 const esAdministradorActivo = (c) => c.estado && c.rol_id === ROLES.ADMINISTRADOR;
 
-// Gestión de cuentas (solo administrador): listar, crear, editar y desactivar/reactivar.
-// Endpoints: GET/PATCH /api/usuarios, GET /api/panaderias y POST /api/auth/registrar.
+// Gestión de cuentas (solo administrador): listar, crear, editar, desactivar/reactivar y enviar un
+// enlace de restablecimiento de contraseña a otra cuenta activa.
+// Endpoints: GET/PATCH /api/usuarios, GET /api/panaderias, POST /api/auth/registrar y
+// POST /api/usuarios/:id/restablecimiento.
+// Cada administrador gestiona solo las cuentas de su panadería: el backend devuelve solo esas
+// cuentas y su panadería, crea las cuentas nuevas en ella y no crea ni asciende administradores.
 const Cuentas = () => {
   const { usuario, actualizarUsuario } = useAuth();
   const esAdministrador = usuario?.rol_id === ROLES.ADMINISTRADOR;
@@ -41,7 +46,6 @@ const Cuentas = () => {
   const [errorGeneral, setErrorGeneral] = useState(null);
   const [aviso, setAviso] = useState(null);
   const [guardando, setGuardando] = useState(false);
-  const [confirmarAdmin, setConfirmarAdmin] = useState(null);
   const guardandoRef = useRef(false);
 
   const [editando, setEditando] = useState(null);
@@ -49,6 +53,7 @@ const Cuentas = () => {
   const [errorEstado, setErrorEstado] = useState(null);
   const [cambiandoEstado, setCambiandoEstado] = useState(null);
   const cambiandoEstadoRef = useRef(false);
+  const [restableciendo, setRestableciendo] = useState(null);
 
   const cargar = useCallback(async () => {
     setCargando(true);
@@ -85,15 +90,19 @@ const Cuentas = () => {
 
   const administradoresActivos = cuentas.filter(esAdministradorActivo).length;
   const esUltimoAdministrador = (c) => esAdministradorActivo(c) && administradoresActivos <= 1;
-  const nombrePanaderia = (c) =>
-    c.panaderia?.nombre ?? panaderias.find(p => p.id === c.panaderia_id)?.nombre ?? '—';
+  // Nombre que da la API; sin panadería asignada o sin nombre disponible no se inventa ninguno
+  const nombrePanaderia = (c) => {
+    if (c.panaderia_id === null || c.panaderia_id === undefined) return 'Sin asignar';
+    return c.panaderia?.nombre ?? panaderias.find(p => p.id === c.panaderia_id)?.nombre ?? '—';
+  };
+  // GET /api/panaderias devuelve solo la panadería del administrador
+  const panaderiaPropia = panaderias.length === 1 ? panaderias[0].nombre : null;
 
   const reemplazar = (actualizada) =>
     setCuentas(lista => lista.map(c => (c.id === actualizada.id ? actualizada : c)));
 
   // ---------- Crear ----------
   const rolId = Number(valores.rol_id);
-  const requierePanaderia = rolId !== ROLES.ADMINISTRADOR;
   const cambiar = (campo) => (e) => setValores(v => ({ ...v, [campo]: e.target.value }));
 
   const leerFormulario = () => {
@@ -103,17 +112,11 @@ const Cuentas = () => {
     const errorContrasena = validarContrasena(valores.contrasena);
     if (errorContrasena) nuevos.contrasena = errorContrasena;
     if (!nuevos.contrasena && valores.confirmacion !== valores.contrasena) nuevos.confirmacion = 'Las contraseñas no coinciden';
-    const panaderiaId = Number(valores.panaderia_id);
-    if (requierePanaderia && !panaderias.some(p => p.id === panaderiaId)) nuevos.panaderia_id = 'Selecciona la panadería';
+    if (!ROLES_ASIGNABLES.some(o => o.valor === rolId)) nuevos.rol_id = 'Selecciona un rol';
     setErrores(nuevos);
     if (Object.keys(nuevos).length > 0) return null;
-    // El administrador general no se asigna a una panadería (regla del backend)
-    return {
-      email: email.valor,
-      contrasena: valores.contrasena,
-      rol_id: rolId,
-      ...(requierePanaderia ? { panaderia_id: panaderiaId } : {})
-    };
+    // La panadería no se envía: el backend crea la cuenta en la del administrador autenticado
+    return { email: email.valor, contrasena: valores.contrasena, rol_id: rolId };
   };
 
   const crearCuenta = async (cuerpo) => {
@@ -126,11 +129,9 @@ const Cuentas = () => {
       setAviso(`Cuenta creada para «${cuerpo.email}» (id ${res.data.id}).`);
       setValores(VACIO);
       setErrores({});
-      setConfirmarAdmin(null);
       cargar();
     } catch (error) {
       setErrorGeneral(mensajeError(error, 'No se pudo crear la cuenta.'));
-      setConfirmarAdmin(null);
     } finally {
       guardandoRef.current = false;
       setGuardando(false);
@@ -142,9 +143,7 @@ const Cuentas = () => {
     setAviso(null);
     const cuerpo = leerFormulario();
     if (!cuerpo) return;
-    // Crear un administrador da acceso total: se confirma antes
-    if (cuerpo.rol_id === ROLES.ADMINISTRADOR) setConfirmarAdmin(cuerpo);
-    else crearCuenta(cuerpo);
+    crearCuenta(cuerpo);
   };
 
   // ---------- Desactivar / reactivar ----------
@@ -175,7 +174,7 @@ const Cuentas = () => {
         <PageHeader
           antetitulo="Administración"
           titulo="Cuentas"
-          descripcion="Crea, edita y desactiva las cuentas de quienes usan Pansys en cada panadería."
+          descripcion="Crea, edita y desactiva las cuentas de quienes usan Pansys en tu panadería."
           acciones={(
             <Boton variante="contorno" onClick={cargar} disabled={cargando}>
               <RefreshCw className="size-4" aria-hidden="true" />
@@ -219,7 +218,7 @@ const Cuentas = () => {
                         {esPropia && <span className="ml-2 text-xs text-muted-foreground">(tu cuenta)</span>}
                       </TablaCelda>
                       <TablaCelda>{c.rol ? c.rol.charAt(0).toUpperCase() + c.rol.slice(1) : nombreRol(c.rol_id)}</TablaCelda>
-                      <TablaCelda>{c.rol_id === ROLES.ADMINISTRADOR ? 'Todas' : nombrePanaderia(c)}</TablaCelda>
+                      <TablaCelda>{nombrePanaderia(c)}</TablaCelda>
                       <TablaCelda>
                         <StatusBadge tono={c.estado ? 'exito' : 'neutro'}>{c.estado ? 'Activa' : 'Desactivada'}</StatusBadge>
                       </TablaCelda>
@@ -229,6 +228,18 @@ const Cuentas = () => {
                             <Pencil className="size-3.5" aria-hidden="true" />
                             Editar
                           </Boton>
+                          {/* Solo para otra cuenta activa: el backend rechaza la propia (403) y las desactivadas (409) */}
+                          {!esPropia && c.estado && (
+                            <Boton
+                              variante="contorno"
+                              tamano="sm"
+                              onClick={() => { setAviso(null); setRestableciendo(c); }}
+                              aria-label={`Enviar enlace de restablecimiento a ${c.email}`}
+                            >
+                              <KeyRound className="size-3.5" aria-hidden="true" />
+                              Restablecer
+                            </Boton>
+                          )}
                           {!esPropia && (c.estado ? (
                             <Boton
                               variante="contorno"
@@ -277,8 +288,8 @@ const Cuentas = () => {
                 error={errores.email}
                 maxLength={255}
               />
-              <Selector etiqueta="Rol" value={valores.rol_id} onChange={cambiar('rol_id')} ayuda={ayudaRol}>
-                {OPCIONES_ROL.map(o => <option key={o.valor} value={o.valor}>{o.etiqueta}</option>)}
+              <Selector etiqueta="Rol" value={valores.rol_id} onChange={cambiar('rol_id')} ayuda={ayudaRol} error={errores.rol_id}>
+                {ROLES_ASIGNABLES.map(o => <option key={o.valor} value={o.valor}>{o.etiqueta}</option>)}
               </Selector>
               <Campo
                 etiqueta="Contraseña"
@@ -297,20 +308,15 @@ const Cuentas = () => {
                 onChange={cambiar('confirmacion')}
                 error={errores.confirmacion}
               />
-              {requierePanaderia && (
-                <Selector
-                  etiqueta="Panadería"
-                  value={valores.panaderia_id}
-                  onChange={cambiar('panaderia_id')}
-                  error={errores.panaderia_id ?? errorPanaderias}
-                >
-                  <option value="">Selecciona una panadería</option>
-                  {panaderias.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
-                </Selector>
-              )}
             </div>
+            <p className="text-sm text-muted-foreground">
+              {panaderiaPropia
+                ? <>La cuenta se creará en tu panadería: <span className="font-medium text-foreground">{panaderiaPropia}</span>.</>
+                : 'La cuenta se creará en la panadería de tu cuenta.'}
+            </p>
+            {errorPanaderias && <Aviso tipo="error">{errorPanaderias}</Aviso>}
             <div className="flex justify-end">
-              <Boton type="submit" cargando={guardando && !confirmarAdmin}>
+              <Boton type="submit" cargando={guardando}>
                 <UserPlus className="size-4" aria-hidden="true" />
                 Crear cuenta
               </Boton>
@@ -318,17 +324,6 @@ const Cuentas = () => {
           </form>
         </Panel>
       </div>
-
-      {confirmarAdmin && (
-        <DialogoConfirmacion
-          titulo="¿Crear una cuenta de administrador?"
-          descripcion={`«${confirmarAdmin.email}» tendrá acceso total a las dos panaderías y podrá gestionar todas las cuentas.`}
-          textoConfirmar="Crear administrador"
-          confirmando={guardando}
-          onConfirmar={() => crearCuenta(confirmarAdmin)}
-          onCancelar={() => setConfirmarAdmin(null)}
-        />
-      )}
 
       {desactivando && (
         <DialogoConfirmacion
@@ -342,10 +337,22 @@ const Cuentas = () => {
         />
       )}
 
+      {restableciendo && (
+        <DialogoRestablecer
+          cuenta={restableciendo}
+          onEnviado={(mensaje) => {
+            const email = restableciendo.email;
+            setRestableciendo(null);
+            setAviso(`«${email}»: ${mensaje}`);
+          }}
+          onCerrar={() => setRestableciendo(null)}
+        />
+      )}
+
       {editando && (
         <DialogoEditarCuenta
           cuenta={editando}
-          panaderias={panaderias}
+          panaderia={nombrePanaderia(editando)}
           esPropia={editando.id === usuario.id}
           esUltimoAdministrador={esUltimoAdministrador(editando)}
           onGuardada={(actualizada) => {

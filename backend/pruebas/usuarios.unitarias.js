@@ -37,6 +37,7 @@ const codigoDe = (fn) => { try { fn(); return null; } catch (e) { return e.statu
 const main = async () => {
   const { sequelize, Usuario, Panaderia } = require('../src/models/index');
   const usuariosService = require('../src/modules/usuarios/usuarios.service');
+  const restablecimientos = require('../src/modules/auth/restablecimiento.repositorio');
   const { asegurarOtroAdministradorActivo } = usuariosService;
 
   // ---------- La regla, aislada ----------
@@ -50,7 +51,8 @@ const main = async () => {
   // ---------- La regla dentro del servicio ----------
   const originales = {
     transaction: sequelize.transaction, findAll: Usuario.findAll, findByPk: Usuario.findByPk,
-    findOne: Usuario.findOne, panaderiaFindByPk: Panaderia.findByPk
+    findOne: Usuario.findOne, panaderiaFindByPk: Panaderia.findByPk,
+    invalidarPendientes: restablecimientos.invalidarPendientes, registrarEvento: restablecimientos.registrarEvento
   };
 
   // Escenario: cuentas en memoria (por defecto, todas de la panadería 20) y la lista de
@@ -61,11 +63,15 @@ const main = async () => {
   let administradoresBloqueados;
   let alLeer;
   const leidas = new Set();
+  // Enlaces de restablecimiento (SQL 005): llamadas anotadas aparte, con si fueron dentro de la
+  // transacción y antes del COMMIT (sin alterar la secuencia de eventos de las demás pruebas)
+  let recuperacion;
   const preparar = ({
     admins, actor = { id: 10, rol_id: 1, estado: true, panaderia_id: 20 },
     objetivo = { id: 11, rol_id: 1, estado: true, panaderia_id: 20 }, otras = [], tras = {}
   }) => {
     eventos = [];
+    recuperacion = [];
     administradoresBloqueados = admins;
     alLeer = tras;
     leidas.clear();
@@ -121,6 +127,14 @@ const main = async () => {
     return copia;
   };
   Usuario.findOne = async () => null;
+  const dentroDeLaTransaccion = (t) => Boolean(t) && eventos.includes('inicio') && !eventos.includes('commit');
+  restablecimientos.invalidarPendientes = async (t, datos) => {
+    recuperacion.push({ op: 'invalidar', enTransaccion: dentroDeLaTransaccion(t), ...datos });
+    return 0;
+  };
+  restablecimientos.registrarEvento = async (t, datos) => {
+    recuperacion.push({ op: 'evento', enTransaccion: dentroDeLaTransaccion(t), ...datos });
+  };
   // La gestión de cuentas ya no consulta panaderías: cualquier consulta se cuenta como fallo
   let consultasPanaderia = 0;
   Panaderia.findByPk = async (id) => { consultasPanaderia++; return { id }; };
@@ -189,6 +203,30 @@ const main = async () => {
     igual('editar el correo de otro administrador de la panadería no le quita la panadería',
       [editarAdmin.ok, cuentas[11].email, cuentas[11].rol_id, cuentas[11].panaderia_id], [true, 'admin.b@pansys.test', 1, 20]);
 
+    console.log('\n== enlaces de restablecimiento: invalidación en la misma transacción');
+    igual('cambio de correo -> invalida los enlaces pendientes y registra el evento, dentro de la transacción y sin direcciones',
+      recuperacion, [
+        { op: 'invalidar', enTransaccion: true, usuarioId: 11, motivo: 'email_cambiado', actorId: 10, panaderiaId: 20 },
+        { op: 'evento', enTransaccion: true, tipo: 'email_cambiado', usuarioId: 11, panaderiaId: 20, actorId: 10 }
+      ]);
+    preparar({ admins: [10, 11] });
+    const mismoCorreo = await resultado(usuariosService.actualizar(10, '11', { email: 'cuenta11@pansys.test', rol_id: 1 }));
+    igual('el mismo correo -> sin invalidación ni evento', [mismoCorreo.ok, recuperacion], [true, []]);
+    preparar({ admins: [10], objetivo: { id: 11, rol_id: 2, estado: true, panaderia_id: 20 } });
+    await resultado(usuariosService.actualizar(10, '11', { rol_id: 3 }));
+    igual('solo cambio de rol -> sin invalidación ni evento', recuperacion, []);
+    preparar({ admins: [10], objetivo: { id: 11, rol_id: 2, estado: true, panaderia_id: 21 } });
+    await resultado(usuariosService.actualizar(10, '11', { email: 'nuevo@pansys.test' }));
+    igual('cambio de correo de una cuenta de otra panadería (404) -> sin invalidación ni evento', recuperacion, []);
+    preparar({ admins: [10], objetivo: { id: 11, rol_id: 2, estado: true, panaderia_id: 20 } });
+    restablecimientos.invalidarPendientes = async () => { throw new Error('Fallo simulado al invalidar'); };
+    const falloInvalidar = await resultado(usuariosService.actualizar(10, '11', { email: 'otro@pansys.test' }));
+    igual('si falla la invalidación, el cambio de correo se deshace (rollback)', [falloInvalidar.ok, eventos.at(-1)], [false, 'rollback']);
+    restablecimientos.invalidarPendientes = async (t, datos) => {
+      recuperacion.push({ op: 'invalidar', enTransaccion: dentroDeLaTransaccion(t), ...datos });
+      return 0;
+    };
+
     console.log('\n== quien actúa: panadería asignada y comprobación tras los bloqueos');
     preparar({ admins: [11], actor: { id: 10, rol_id: 1, estado: true, panaderia_id: null } });
     const sinPanaderia = await resultado(usuariosService.actualizar(10, '11', { rol_id: 2 }));
@@ -216,10 +254,16 @@ const main = async () => {
     const desactivarConOtro = await resultado(usuariosService.cambiarEstado(10, '11', { estado: false }));
     igual('D3: con otro administrador activo -> desactivación aplicada y versión de sesión incrementada',
       [desactivarConOtro.ok, cuentas[11].estado, typeof cuentas[11].version_sesion === 'object'], [true, false, true]);
+    igual('desactivar -> invalida los enlaces pendientes en la misma transacción',
+      recuperacion, [{ op: 'invalidar', enTransaccion: true, usuarioId: 11, motivo: 'cuenta_desactivada', actorId: 10, panaderiaId: 20 }]);
 
     preparar({ admins: [11] });
     const reactivar = await resultado(usuariosService.cambiarEstado(10, '11', { estado: true }));
     igual('activar nunca aplica la regla', reactivar.ok, true);
+    igual('activar no invalida enlaces', recuperacion, []);
+    preparar({ admins: [10, 11], objetivo: { id: 11, rol_id: 1, estado: false, panaderia_id: 20 } });
+    await resultado(usuariosService.cambiarEstado(10, '11', { estado: false }));
+    igual('desactivar una cuenta ya desactivada (sin cambio) no invalida enlaces', recuperacion, []);
 
     preparar({ admins: [10], objetivo: { id: 11, rol_id: 2, estado: true, panaderia_id: 21 } });
     const desactivarAjena = await resultado(usuariosService.cambiarEstado(10, '11', { estado: false }));
@@ -283,6 +327,8 @@ const main = async () => {
     Usuario.findByPk = originales.findByPk;
     Usuario.findOne = originales.findOne;
     Panaderia.findByPk = originales.panaderiaFindByPk;
+    restablecimientos.invalidarPendientes = originales.invalidarPendientes;
+    restablecimientos.registrarEvento = originales.registrarEvento;
   }
 };
 

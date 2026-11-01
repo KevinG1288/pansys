@@ -15,9 +15,7 @@ import DialogoFinalizar from '../components/produccion/DialogoFinalizar';
 import FormularioOrden from '../components/produccion/FormularioOrden';
 import TablaOrdenes from '../components/produccion/TablaOrdenes';
 
-// Panadería con la que trabaja la interfaz (para panadero y gerente el backend usa la del token;
-// para el administrador acota las consultas a esta panadería)
-const PANADERIA_ID = 1;
+// La panadería no se envía: el backend usa siempre la de la cuenta autenticada
 const ID_AVISO_CONSULTA = 'aviso-modo-consulta-produccion';
 
 const Produccion = () => {
@@ -38,7 +36,7 @@ const Produccion = () => {
   const cargarOrdenes = useCallback(async () => {
     setErrorOrdenes(null);
     try {
-      const res = await api.get(`/api/produccion/ordenes?panaderia_id=${PANADERIA_ID}`);
+      const res = await api.get('/api/produccion/ordenes');
       setOrdenes(res.data);
     } catch (error) {
       setErrorOrdenes(mensajeError(error, 'No se pudieron cargar las órdenes.'));
@@ -48,7 +46,7 @@ const Produccion = () => {
   const cargarRecetas = useCallback(async () => {
     setErrorRecetas(null);
     try {
-      const res = await api.get(`/api/produccion/recetas?panaderia_id=${PANADERIA_ID}`);
+      const res = await api.get('/api/produccion/recetas');
       setRecetas(res.data);
     } catch (error) {
       setErrorRecetas(mensajeError(error, 'No se pudieron cargar los productos con receta.'));
@@ -74,18 +72,18 @@ const Produccion = () => {
 
   const calcular = useCallback(async (productoId, cantidad) => {
     const res = await api.get(
-      `/api/produccion/calcular?producto_id=${productoId}&cantidad=${cantidad}&panaderia_id=${PANADERIA_ID}`
+      `/api/produccion/calcular?producto_id=${productoId}&cantidad=${cantidad}`
     );
     return res.data;
   }, []);
 
   const cargarDetalle = useCallback(async (ordenId) => {
-    const res = await api.get(`/api/produccion/ordenes/${ordenId}?panaderia_id=${PANADERIA_ID}`);
+    const res = await api.get(`/api/produccion/ordenes/${ordenId}`);
     return res.data;
   }, []);
 
   const crearOrden = async (datos) => {
-    const res = await api.post('/api/produccion/ordenes', { ...datos, panaderia_id: PANADERIA_ID });
+    const res = await api.post('/api/produccion/ordenes', datos);
     const { orden, alertas_stock_bajo: alertas = [] } = res.data;
     setMostrarFormulario(false);
     const nuevos = [{
@@ -104,7 +102,7 @@ const Produccion = () => {
 
   const finalizarOrden = async (datos) => {
     const orden = porFinalizar;
-    await api.patch(`/api/produccion/ordenes/${orden.id}/finalizar?panaderia_id=${PANADERIA_ID}`, datos);
+    await api.patch(`/api/produccion/ordenes/${orden.id}/finalizar`, datos);
     setPorFinalizar(null);
     setAvisos([{
       tipo: 'exito',
@@ -115,7 +113,7 @@ const Produccion = () => {
 
   const cancelarOrden = async (cuerpo) => {
     const orden = porCancelar;
-    await api.patch(`/api/produccion/ordenes/${orden.id}/cancelar?panaderia_id=${PANADERIA_ID}`, cuerpo);
+    await api.patch(`/api/produccion/ordenes/${orden.id}/cancelar`, cuerpo);
     setPorCancelar(null);
     setAvisos([{
       tipo: 'exito',

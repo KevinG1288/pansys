@@ -14,9 +14,7 @@ import StatusBadge from '../components/ui/StatusBadge';
 import { Tabla, TablaCelda, TablaColumna, TablaCuerpo, TablaEncabezado, TablaFila } from '../components/ui/Tabla';
 import EditorReceta from '../components/recetas/EditorReceta';
 
-// Panadería con la que trabaja la interfaz (para panadero y gerente el backend usa la del token;
-// para el administrador acota las consultas a esta panadería)
-const PANADERIA_ID = 1;
+// La panadería no se envía: el backend usa siempre la de la cuenta autenticada
 const ID_AVISO_CONSULTA = 'aviso-modo-consulta-recetas';
 
 const Recetas = () => {
@@ -37,7 +35,7 @@ const Recetas = () => {
   const cargarRecetas = useCallback(async () => {
     setErrorRecetas(null);
     try {
-      const res = await api.get(`/api/produccion/recetas?panaderia_id=${PANADERIA_ID}`);
+      const res = await api.get('/api/produccion/recetas');
       setRecetas(res.data);
     } catch (error) {
       setErrorRecetas(mensajeError(error, 'No se pudieron cargar las recetas.'));
@@ -48,7 +46,7 @@ const Recetas = () => {
   const cargarMaterias = useCallback(async () => {
     setErrorMaterias(null);
     try {
-      const res = await api.get(`/api/inventario?panaderia_id=${PANADERIA_ID}`);
+      const res = await api.get('/api/inventario');
       setMaterias(res.data);
     } catch (error) {
       setErrorMaterias(mensajeError(error, 'No se pudieron cargar las materias primas.'));
@@ -70,7 +68,7 @@ const Recetas = () => {
 
   const guardarReceta = async (cuerpo, existe) => {
     const producto = editando;
-    const url = `/api/produccion/recetas/${producto.producto_id}?panaderia_id=${PANADERIA_ID}`;
+    const url = `/api/produccion/recetas/${producto.producto_id}`;
     if (existe) await api.put(url, cuerpo);
     else await api.post(url, cuerpo);
     setEditando(null);
@@ -82,7 +80,7 @@ const Recetas = () => {
     setEliminando(true);
     setErrorEliminar(null);
     try {
-      await api.delete(`/api/produccion/recetas/${porEliminar.producto_id}?panaderia_id=${PANADERIA_ID}`);
+      await api.delete(`/api/produccion/recetas/${porEliminar.producto_id}`);
       setAviso({ tipo: 'exito', texto: `Receta de «${porEliminar.producto}» eliminada. Las órdenes existentes no cambian.` });
       setPorEliminar(null);
       await cargarRecetas();

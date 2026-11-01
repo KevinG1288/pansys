@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node src/app.js",
+    "start:produccion": "node src/app.js --entorno=produccion",
     "dev": "nodemon src/app.js",
     "test:produccion": "node pruebas/produccion.pruebas.js",
     "test:ventas": "node pruebas/ventas.pruebas.js"
@@ -19,6 +20,7 @@
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "mysql2": "^3.24.1",
+    "nodemailer": "10.2.1",
     "sequelize": "^6.37.8",
     "socket.io": "^4.8.3"
   },

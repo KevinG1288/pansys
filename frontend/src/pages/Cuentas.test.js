@@ -10,11 +10,23 @@ jest.mock('../services/api', () => ({
   default: { get: jest.fn(), post: jest.fn(), patch: jest.fn() }
 }));
 
-const ADMIN = { id: 1, email: 'admin@pansys.com', rol: 'administrador', rol_id: 1, panaderia_id: null };
+// Ninguna petición envía panaderia_id: el backend usa siempre la panadería de la cuenta autenticada
+afterEach(() => {
+  for (const llamadas of Object.values(api).map(f => f?.mock?.calls ?? [])) {
+    for (const [url, cuerpo] of llamadas) {
+      expect(String(url)).not.toMatch(/panaderia_id/);
+      if (cuerpo && typeof cuerpo === 'object') expect(cuerpo).not.toHaveProperty('panaderia_id');
+    }
+  }
+});
+
+// Cada administrador pertenece a una panadería: GET /api/usuarios y GET /api/panaderias devuelven
+// solo las cuentas y la panadería del administrador que consulta
+const ADMIN = { id: 1, email: 'admin@pansys.com', rol: 'administrador', rol_id: 1, panaderia_id: 1 };
 const PANADERO = { id: 2, email: 'panadero@pansys.com', rol: 'panadero', rol_id: 2, panaderia_id: 1 };
 const GERENTE = { id: 4, email: 'gerente@pansys.com', rol: 'gerente', rol_id: 3, panaderia_id: 1 };
 
-const PANADERIAS = [{ id: 1, nombre: 'Panadería Uno' }, { id: 2, nombre: 'Panadería Dos' }];
+const PANADERIAS = [{ id: 1, nombre: 'Panadería Uno' }];
 
 // Mismo formato que GET /api/usuarios (sin contraseñas)
 const cuenta = (id, email, rol_id, panaderia_id, estado = true) => ({
@@ -30,11 +42,16 @@ const cuenta = (id, email, rol_id, panaderia_id, estado = true) => ({
 });
 
 const CUENTAS = [
-  cuenta(1, 'admin@pansys.com', 1, null),
+  cuenta(1, 'admin@pansys.com', 1, 1),
   cuenta(2, 'panadero1@pansys.com', 2, 1),
   cuenta(4, 'gerente1@pansys.com', 3, 1),
-  cuenta(5, 'antiguo@pansys.com', 2, 2, false)
+  cuenta(5, 'antiguo@pansys.com', 2, 1, false)
 ];
+// Con una segunda administradora activa en la panadería (se puede degradar a cualquiera de las dos)
+const CON_DOS_ADMINS = [...CUENTAS, cuenta(3, 'admin2@pansys.com', 1, 1)];
+
+const opcionesRol = (contenedor) =>
+  within(within(contenedor).getByLabelText('Rol')).getAllByRole('option').map(o => o.textContent);
 
 const simularGet = ({ cuentas = CUENTAS, panaderias = PANADERIAS, falloCuentas, falloPanaderias } = {}) => {
   api.get.mockImplementation((url) => {
@@ -53,12 +70,11 @@ const renderizar = async (usuario = ADMIN, { esperarTabla = usuario.rol_id === 1
 
 const fila = (email) => screen.getByRole('row', { name: new RegExp(email.replace(/\./g, '\\.')) });
 
-const llenar = ({ email, contrasena, confirmacion = contrasena, rol, panaderia }) => {
+const llenar = ({ email, contrasena, confirmacion = contrasena, rol }) => {
   userEvent.type(screen.getByLabelText('Correo electrónico'), email);
   userEvent.type(screen.getByLabelText('Contraseña'), contrasena);
   userEvent.type(screen.getByLabelText('Confirmar contraseña'), confirmacion);
   if (rol) userEvent.selectOptions(screen.getByLabelText('Rol'), rol);
-  if (panaderia) userEvent.selectOptions(screen.getByLabelText('Panadería'), panaderia);
 };
 
 const crear = () => userEvent.click(screen.getByRole('button', { name: 'Crear cuenta' }));
@@ -80,9 +96,19 @@ describe('Listado', () => {
     expect(within(fila('panadero1@pansys.com')).getByText('Panadero')).toBeInTheDocument();
     expect(within(fila('panadero1@pansys.com')).getByText('Panadería Uno')).toBeInTheDocument();
     expect(within(fila('panadero1@pansys.com')).getByText('Activa')).toBeInTheDocument();
-    expect(within(fila('admin@pansys.com')).getByText('Todas')).toBeInTheDocument();
+    // El administrador pertenece a su panadería: ya no figura con acceso a «Todas»
+    expect(within(fila('admin@pansys.com')).getByText('Panadería Uno')).toBeInTheDocument();
+    expect(screen.queryByText('Todas')).not.toBeInTheDocument();
     expect(within(fila('antiguo@pansys.com')).getByText('Desactivada')).toBeInTheDocument();
     expect(screen.queryByText(/pendientes de aprobación/)).not.toBeInTheDocument();
+  });
+
+  test('una cuenta sin panadería asignada lo indica sin inventar un nombre', async () => {
+    simularGet({ cuentas: [...CUENTAS, cuenta(9, 'sin.panaderia@pansys.com', 1, null)] });
+    await renderizar();
+
+    expect(within(fila('sin.panaderia@pansys.com')).getByText('Sin asignar')).toBeInTheDocument();
+    expect(screen.queryByText('Todas')).not.toBeInTheDocument();
   });
 
   test('la propia cuenta se marca y no puede desactivarse', async () => {
@@ -102,48 +128,46 @@ describe('Listado', () => {
 });
 
 describe('Crear cuenta', () => {
-  test('crea una cuenta de panadero eligiendo la panadería de GET /api/panaderias', async () => {
+  test('crea una cuenta de panadero en la panadería del administrador, sin elegirla ni enviarla', async () => {
     api.post.mockResolvedValueOnce({ data: { mensaje: 'Usuario creado exitosamente', id: 7 } });
     await renderizar();
 
-    expect(screen.getByRole('option', { name: 'Panadería Dos' })).toBeInTheDocument();
-    llenar({ email: ' nuevo@pansys.com ', contrasena: 'Panaderia2026', rol: '2', panaderia: '2' });
+    expect(screen.queryByLabelText('Panadería')).not.toBeInTheDocument();
+    expect(screen.getByText('Panadería Uno', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.getByText(/La cuenta se creará en tu panadería/)).toBeInTheDocument();
+    llenar({ email: ' nuevo@pansys.com ', contrasena: 'Panaderia2026', rol: '2' });
     crear();
 
     expect(await screen.findByText('Cuenta creada para «nuevo@pansys.com» (id 7).')).toBeInTheDocument();
+    // Solo email, contraseña y rol: la panadería la decide el backend
     expect(api.post).toHaveBeenCalledWith('/api/auth/registrar', {
-      email: 'nuevo@pansys.com', contrasena: 'Panaderia2026', rol_id: 2, panaderia_id: 2
+      email: 'nuevo@pansys.com', contrasena: 'Panaderia2026', rol_id: 2
     });
+    expect(api.post.mock.calls[0][1]).not.toHaveProperty('panaderia_id');
     expect(screen.getByLabelText('Correo electrónico')).toHaveValue('');
     expect(screen.getByLabelText('Contraseña')).toHaveValue('');
     // El listado se recarga para mostrar la cuenta nueva
     await waitFor(() => expect(api.get.mock.calls.filter(([url]) => url === '/api/usuarios')).toHaveLength(2));
   });
 
-  test('una cuenta de administrador no lleva panadería y exige confirmación', async () => {
+  test('el alta solo ofrece Panadero y Gerente y no pide confirmar ningún administrador', async () => {
     api.post.mockResolvedValueOnce({ data: { mensaje: 'Usuario creado exitosamente', id: 8 } });
     await renderizar();
 
-    userEvent.selectOptions(screen.getByLabelText('Rol'), '1');
-    expect(screen.queryByLabelText('Panadería')).not.toBeInTheDocument();
-    llenar({ email: 'otro.admin@pansys.com', contrasena: 'Segura2026' });
+    const formulario = screen.getByRole('button', { name: 'Crear cuenta' }).closest('form');
+    expect(opcionesRol(formulario)).toEqual(['Panadero', 'Gerente']);
+    expect(within(formulario).queryByRole('option', { name: 'Administrador' })).not.toBeInTheDocument();
+    llenar({ email: 'nuevo.gerente@pansys.com', contrasena: 'Segura2026', rol: '3' });
     crear();
 
-    const dialogo = screen.getByRole('alertdialog', { name: '¿Crear una cuenta de administrador?' });
-    expect(api.post).not.toHaveBeenCalled();
-    userEvent.click(within(dialogo).getByRole('button', { name: 'Cancelar' }));
-    expect(api.post).not.toHaveBeenCalled();
-
-    crear();
-    userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Crear administrador' }));
-
-    expect(await screen.findByText('Cuenta creada para «otro.admin@pansys.com» (id 8).')).toBeInTheDocument();
+    expect(await screen.findByText('Cuenta creada para «nuevo.gerente@pansys.com» (id 8).')).toBeInTheDocument();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(api.post).toHaveBeenCalledWith('/api/auth/registrar', {
-      email: 'otro.admin@pansys.com', contrasena: 'Segura2026', rol_id: 1
+      email: 'nuevo.gerente@pansys.com', contrasena: 'Segura2026', rol_id: 3
     });
   });
 
-  test('valida email, contraseña, confirmación y panadería antes de enviar', async () => {
+  test('valida email, contraseña y confirmación antes de enviar (no hay panadería que elegir)', async () => {
     await renderizar();
 
     llenar({ email: 'correo-invalido', contrasena: 'corta', confirmacion: 'otra' });
@@ -151,7 +175,7 @@ describe('Crear cuenta', () => {
 
     expect(screen.getByLabelText('Correo electrónico')).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByText('Debe tener al menos 8 caracteres')).toBeInTheDocument();
-    expect(screen.getByLabelText('Panadería')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.queryByLabelText('Panadería')).not.toBeInTheDocument();
     expect(api.post).not.toHaveBeenCalled();
 
     userEvent.clear(screen.getByLabelText('Contraseña'));
@@ -161,27 +185,42 @@ describe('Crear cuenta', () => {
     expect(api.post).not.toHaveBeenCalled();
   });
 
-  test('si no se cargan las panaderías, el selector lo indica y no se envía', async () => {
+  test('si no se carga la panadería, lo indica sin inventar un nombre; el backend sigue decidiéndola', async () => {
+    api.post.mockResolvedValueOnce({ data: { mensaje: 'Usuario creado exitosamente', id: 7 } });
     simularGet({ falloPanaderias: { request: {} } });
     await renderizar();
 
     expect(screen.getByText('No se pudo conectar con el servidor.')).toBeInTheDocument();
+    expect(screen.getByText('La cuenta se creará en la panadería de tu cuenta.')).toBeInTheDocument();
     llenar({ email: 'nuevo@pansys.com', contrasena: 'Panaderia2026' });
     crear();
-    expect(screen.getByText('Selecciona la panadería')).toBeInTheDocument();
-    expect(api.post).not.toHaveBeenCalled();
+    expect(await screen.findByText('Cuenta creada para «nuevo@pansys.com» (id 7).')).toBeInTheDocument();
+    expect(api.post).toHaveBeenCalledWith('/api/auth/registrar', {
+      email: 'nuevo@pansys.com', contrasena: 'Panaderia2026', rol_id: 2
+    });
   });
 
   test('muestra el error del backend (por ejemplo, email repetido)', async () => {
     api.post.mockRejectedValueOnce({ response: { status: 400, data: { error: 'El email ya está registrado' } } });
     await renderizar();
 
-    llenar({ email: 'admin@pansys.com', contrasena: 'Panaderia2026', panaderia: '1' });
+    llenar({ email: 'admin@pansys.com', contrasena: 'Panaderia2026' });
     crear();
 
     expect(await screen.findByRole('alert')).toHaveTextContent('El email ya está registrado');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Crear cuenta' })).toBeEnabled());
     expect(screen.getByLabelText('Correo electrónico')).toHaveValue('admin@pansys.com');
+  });
+
+  test('muestra el rechazo del backend por permisos (403) tal como lo envía', async () => {
+    api.post.mockRejectedValueOnce({ response: { status: 403, data: { error: 'No tiene permisos para crear administradores' } } });
+    await renderizar();
+
+    llenar({ email: 'nuevo@pansys.com', contrasena: 'Panaderia2026' });
+    crear();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('No tiene permisos para crear administradores');
+    expect(localStorage.getItem('token')).toBe('token-de-prueba');
   });
 });
 
@@ -191,36 +230,64 @@ describe('Editar cuenta', () => {
     return screen.getByRole('dialog', { name: 'Editar cuenta' });
   };
 
-  test('cambia rol y panadería con PATCH /api/usuarios/:id y actualiza la fila', async () => {
-    api.patch.mockResolvedValueOnce({ data: cuenta(2, 'panadero1@pansys.com', 3, 2) });
+  test('cambia el rol con PATCH /api/usuarios/:id (sin panaderia_id) y actualiza la fila', async () => {
+    api.patch.mockResolvedValueOnce({ data: cuenta(2, 'panadero1@pansys.com', 3, 1) });
     await renderizar();
 
     const dialogo = abrirEdicion('panadero1@pansys.com');
     expect(within(dialogo).getByLabelText('Correo electrónico')).toHaveValue('panadero1@pansys.com');
+    // La panadería se muestra como dato de solo lectura, no como campo editable
+    expect(within(dialogo).queryByLabelText('Panadería')).not.toBeInTheDocument();
+    expect(within(dialogo).getByText('Panadería Uno')).toBeInTheDocument();
     userEvent.selectOptions(within(dialogo).getByLabelText('Rol'), '3');
-    userEvent.selectOptions(within(dialogo).getByLabelText('Panadería'), '2');
     userEvent.click(within(dialogo).getByRole('button', { name: 'Guardar cambios' }));
 
     expect(await screen.findByText('Cuenta «panadero1@pansys.com» actualizada.')).toBeInTheDocument();
-    expect(api.patch).toHaveBeenCalledWith('/api/usuarios/2', { email: 'panadero1@pansys.com', rol_id: 3, panaderia_id: 2 });
+    expect(api.patch).toHaveBeenCalledWith('/api/usuarios/2', { email: 'panadero1@pansys.com', rol_id: 3 });
+    expect(api.patch.mock.calls[0][1]).not.toHaveProperty('panaderia_id');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(within(fila('panadero1@pansys.com')).getByText('Gerente')).toBeInTheDocument();
-    expect(within(fila('panadero1@pansys.com')).getByText('Panadería Dos')).toBeInTheDocument();
+    expect(within(fila('panadero1@pansys.com')).getByText('Panadería Uno')).toBeInTheDocument();
   });
 
-  test('promover a administrador envía panaderia_id null y avisa del acceso total', async () => {
-    api.patch.mockResolvedValueOnce({ data: cuenta(4, 'gerente1@pansys.com', 1, null) });
+  test('a una cuenta que no es administradora no se le ofrece el rol de administrador', async () => {
     await renderizar();
 
     const dialogo = abrirEdicion('gerente1@pansys.com');
-    userEvent.selectOptions(within(dialogo).getByLabelText('Rol'), '1');
-    expect(within(dialogo).queryByLabelText('Panadería')).not.toBeInTheDocument();
-    expect(within(dialogo).getByText('Acceso total')).toBeInTheDocument();
+    expect(opcionesRol(dialogo)).toEqual(['Panadero', 'Gerente']);
+    expect(within(dialogo).queryByText('Acceso total')).not.toBeInTheDocument();
+    expect(api.patch).not.toHaveBeenCalled();
+  });
+
+  test('editar el email de otra administradora envía solo email y rol (sin panaderia_id: null)', async () => {
+    simularGet({ cuentas: CON_DOS_ADMINS });
+    api.patch.mockResolvedValueOnce({ data: cuenta(3, 'admin.b@pansys.com', 1, 1) });
+    await renderizar();
+
+    const dialogo = abrirEdicion('admin2@pansys.com');
+    // Conserva su rol actual como opción; con otra administradora activa se puede degradar
+    expect(opcionesRol(dialogo)).toEqual(['Panadero', 'Gerente', 'Administrador']);
+    expect(within(dialogo).getByLabelText('Rol')).toBeEnabled();
+    userEvent.clear(within(dialogo).getByLabelText('Correo electrónico'));
+    userEvent.type(within(dialogo).getByLabelText('Correo electrónico'), 'admin.b@pansys.com');
     userEvent.click(within(dialogo).getByRole('button', { name: 'Guardar cambios' }));
 
-    await waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/usuarios/4', {
-      email: 'gerente1@pansys.com', rol_id: 1, panaderia_id: null
-    }));
+    expect(await screen.findByText('Cuenta «admin.b@pansys.com» actualizada.')).toBeInTheDocument();
+    expect(api.patch).toHaveBeenCalledWith('/api/usuarios/3', { email: 'admin.b@pansys.com', rol_id: 1 });
+  });
+
+  test('con otra administradora activa, una administradora se puede degradar (lo confirma el backend)', async () => {
+    simularGet({ cuentas: CON_DOS_ADMINS });
+    api.patch.mockResolvedValueOnce({ data: cuenta(3, 'admin2@pansys.com', 2, 1) });
+    await renderizar();
+
+    const dialogo = abrirEdicion('admin2@pansys.com');
+    userEvent.selectOptions(within(dialogo).getByLabelText('Rol'), '2');
+    userEvent.click(within(dialogo).getByRole('button', { name: 'Guardar cambios' }));
+
+    expect(await screen.findByText('Cuenta «admin2@pansys.com» actualizada.')).toBeInTheDocument();
+    expect(api.patch).toHaveBeenCalledWith('/api/usuarios/3', { email: 'admin2@pansys.com', rol_id: 2 });
+    expect(within(fila('admin2@pansys.com')).getByText('Panadero')).toBeInTheDocument();
   });
 
   test('en la propia cuenta el rol está bloqueado (solo se edita el email)', async () => {
@@ -232,7 +299,7 @@ describe('Editar cuenta', () => {
   });
 
   test('al cambiar el email propio se actualiza la sesión mostrada (no el token)', async () => {
-    api.patch.mockResolvedValueOnce({ data: cuenta(1, 'admin.nuevo@pansys.com', 1, null) });
+    api.patch.mockResolvedValueOnce({ data: cuenta(1, 'admin.nuevo@pansys.com', 1, 1) });
     await renderizar();
 
     const dialogo = abrirEdicion('admin@pansys.com');
@@ -241,7 +308,8 @@ describe('Editar cuenta', () => {
     userEvent.click(within(dialogo).getByRole('button', { name: 'Guardar cambios' }));
 
     expect(await screen.findByText('Cuenta «admin.nuevo@pansys.com» actualizada.')).toBeInTheDocument();
-    expect(api.patch).toHaveBeenCalledWith('/api/usuarios/1', { email: 'admin.nuevo@pansys.com', rol_id: 1, panaderia_id: null });
+    // Antes se enviaba panaderia_id: null y el backend respondía 400 (panaderia_id no editable)
+    expect(api.patch).toHaveBeenCalledWith('/api/usuarios/1', { email: 'admin.nuevo@pansys.com', rol_id: 1 });
     expect(JSON.parse(localStorage.getItem('usuario'))).toEqual({ ...ADMIN, email: 'admin.nuevo@pansys.com' });
     expect(localStorage.getItem('token')).toBe('token-de-prueba');
     expect(within(fila('admin.nuevo@pansys.com')).getByText('(tu cuenta)')).toBeInTheDocument();
@@ -309,7 +377,7 @@ describe('Desactivar y reactivar', () => {
   });
 
   test('reactivar una cuenta desactivada', async () => {
-    api.patch.mockResolvedValueOnce({ data: cuenta(5, 'antiguo@pansys.com', 2, 2, true) });
+    api.patch.mockResolvedValueOnce({ data: cuenta(5, 'antiguo@pansys.com', 2, 1, true) });
     await renderizar();
 
     userEvent.click(screen.getByRole('button', { name: 'Reactivar antiguo@pansys.com' }));
@@ -361,4 +429,59 @@ test.each([['panadero', PANADERO], ['gerente', GERENTE]])('un %s no puede gestio
   expect(screen.queryByRole('button', { name: 'Crear cuenta' })).not.toBeInTheDocument();
   expect(api.get).not.toHaveBeenCalled();
   expect(api.post).not.toHaveBeenCalled();
+});
+
+describe('Restablecer contraseña (enlace asistido)', () => {
+  const CLAVE = 'ClaveAdmin123';
+  const accion = (email) => `Enviar enlace de restablecimiento a ${email}`;
+
+  test('se ofrece solo para otras cuentas activas: ni la propia ni las desactivadas', async () => {
+    simularGet({ cuentas: CON_DOS_ADMINS });
+    await renderizar();
+    expect(within(fila('panadero1@pansys.com')).getByRole('button', { name: accion('panadero1@pansys.com') })).toBeInTheDocument();
+    expect(within(fila('gerente1@pansys.com')).getByRole('button', { name: accion('gerente1@pansys.com') })).toBeInTheDocument();
+    expect(within(fila('admin2@pansys.com')).getByRole('button', { name: accion('admin2@pansys.com') })).toBeInTheDocument();
+    expect(within(fila('admin@pansys.com')).queryByRole('button', { name: /Enviar enlace de restablecimiento/ })).toBeNull();
+    expect(within(fila('antiguo@pansys.com')).queryByRole('button', { name: /Enviar enlace de restablecimiento/ })).toBeNull();
+  });
+
+  test('200 -> el diálogo se cierra y el aviso muestra la cuenta y el mensaje del backend', async () => {
+    api.post.mockResolvedValueOnce({ status: 200, data: { mensaje: 'Se envió un enlace de restablecimiento al correo de la cuenta. Es válido durante 30 minutos.' } });
+    await renderizar();
+    userEvent.click(within(fila('panadero1@pansys.com')).getByRole('button', { name: accion('panadero1@pansys.com') }));
+    const dialogo = screen.getByRole('dialog');
+    userEvent.type(within(dialogo).getByLabelText('Tu contraseña'), CLAVE);
+    userEvent.click(within(dialogo).getByRole('button', { name: 'Enviar enlace' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(api.post).toHaveBeenCalledWith('/api/usuarios/2/restablecimiento', { contrasena: CLAVE });
+    expect(screen.getByRole('status')).toHaveTextContent('«panadero1@pansys.com»: Se envió un enlace de restablecimiento al correo de la cuenta.');
+    // La contraseña no queda en ningún campo ni texto de la página
+    expect(document.body.textContent).not.toContain(CLAVE);
+    expect([...document.querySelectorAll('input')].some(i => i.value === CLAVE)).toBe(false);
+  });
+
+  test('502 -> el diálogo sigue abierto con el error y no hay aviso de envío', async () => {
+    api.post.mockRejectedValueOnce(Object.assign(new Error('HTTP 502'), {
+      response: { status: 502, data: { error: 'No se pudo enviar el correo. Si la cuenta tenía un enlace anterior, sigue siendo válido.' }, headers: {} }
+    }));
+    await renderizar();
+    userEvent.click(within(fila('gerente1@pansys.com')).getByRole('button', { name: accion('gerente1@pansys.com') }));
+    const dialogo = screen.getByRole('dialog');
+    userEvent.type(within(dialogo).getByLabelText('Tu contraseña'), CLAVE);
+    userEvent.click(within(dialogo).getByRole('button', { name: 'Enviar enlace' }));
+    expect(await within(dialogo).findByRole('alert')).toHaveTextContent('No se pudo enviar el correo.');
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(within(dialogo).getByLabelText('Tu contraseña')).toHaveValue('');
+  });
+
+  test('cerrar el diálogo descarta la contraseña escrita: al reabrirlo el campo está vacío', async () => {
+    await renderizar();
+    userEvent.click(within(fila('panadero1@pansys.com')).getByRole('button', { name: accion('panadero1@pansys.com') }));
+    userEvent.type(screen.getByLabelText('Tu contraseña'), CLAVE);
+    userEvent.click(screen.getByRole('button', { name: 'Cancelar' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    userEvent.click(within(fila('panadero1@pansys.com')).getByRole('button', { name: accion('panadero1@pansys.com') }));
+    expect(screen.getByLabelText('Tu contraseña')).toHaveValue('');
+    expect(api.post).not.toHaveBeenCalled();
+  });
 });

@@ -40,7 +40,7 @@ function ejecutarPruebas() {
   const { spawnSync } = require('child_process');
   const foto = require('./foto_pansys_test');
   const herramienta = require('./aislamiento.mysql');
-  const { ErrorAislamiento, SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS } = require('./aislamiento');
+  const { ErrorAislamiento, Ejecucion, SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS } = require('./aislamiento');
 
   const RAIZ = path.resolve(__dirname, '..', '..');
   const resultados = [];
@@ -425,11 +425,20 @@ function ejecutarPruebas() {
     console.log('\n== aislamiento.mysql.js: flujo completo con dobles');
     // Doble de MySQL para el script y ejecución doble del módulo de aislamiento
     // V11 añade una venta y un detalle; V13, dos materias primas; V15, una administradora asignada a
-    // su panadería (se desasigna antes de borrar), esa panadería y una cuenta más en ella (todo propio)
-    const PREVISTOS = {
+    // su panadería (se desasigna antes de borrar), esa panadería y una cuenta más en ella (todo propio);
+    // V16, dos administradoras sin panadería, 4 eventos y 2 enlaces. Mismo orden que limpiar().
+    const PREVISTOS_SIN_005 = {
       'usuarios (propietarias desasignadas)': 1,
       insumo_usado: 1, orden_produccion: 1, receta_producto: 1, detalle_ventas: 2, ventas: 2, productos: 2,
       materia_prima: 3, 'usuarios (empleados)': 2, panaderias: 3, 'usuarios (propietarias)': 2
+    };
+    const PREVISTOS = {
+      'usuarios (propietarias desasignadas)': 1,
+      insumo_usado: 1, orden_produccion: 1, receta_producto: 1, detalle_ventas: 2, ventas: 2, productos: 2, materia_prima: 3,
+      'eventos_seguridad (sin actor ni panadería)': 1, 'eventos_seguridad (actor propio, sin panadería)': 1,
+      'eventos_seguridad (sin actor, panadería propia)': 1, 'eventos_seguridad (actor propio, panadería propia)': 1,
+      'restablecimientos_contrasena (sin solicitante)': 1, 'restablecimientos_contrasena (solicitante propio)': 1,
+      'usuarios (empleados)': 2, panaderias: 3, 'usuarios (propietarias)': 4
     };
     const CONTAR_MATERIAS = 'SELECT COUNT(*) AS n FROM pansys_test.materia_prima WHERE panaderia_id = ?';
     // Opciones de V11-V14: v11Detecta (la consulta de detalles ajenos cuenta el detalle cruzado),
@@ -437,11 +446,13 @@ function ejecutarPruebas() {
     // NO la fija el FOR UPDATE), aislamiento y aislamientoGlobal (valores que devuelve V14)
     const crearEscenario = ({ v6Bloquea = true, fallarInsertEn = null, bases = [], resultado = 'limpia', borrados = PREVISTOS, segundaObtiene = false, iniciarFalla = false,
       v11Detecta = true, v12Bloquea = true, v13VeFila = true, aislamiento = 'REPEATABLE-READ', aislamientoGlobal = aislamiento,
-      borradosSinDatos = {} } = {}) => {
+      borradosSinDatos = {}, tablas005 = true, v16Detecta = true } = {}) => {
       const estado = {
         conexiones: [], eventos: [], todas: [], ids: 500, productos: {}, bloqueoPanaderia: false, v3Dueno: null, limpio: false,
-        panaderias: [], materias: {}, bloqueoProductos: false, asignaciones: {}
+        panaderias: [], materias: {}, bloqueoProductos: false, asignaciones: {}, eventos005: [], enlaces005: []
       };
+      // Filas de V16 que referencian alguna de las cuentas dadas (lo que cuentan CONTAR_EVENTOS/ENLACES)
+      const contar005 = (filas, ids, otra) => (estado.limpio ? 0 : filas.filter(f => ids.includes(f.usuario) || ids.includes(f[otra])).length);
       // Instantánea de una transacción (REPEATABLE-READ): recuento de materias primas por panadería
       const fijarVista = (c) => { if (!c.vista) c.vista = { ...estado.materias }; };
       const crearConexion = async () => {
@@ -460,7 +471,9 @@ function ejecutarPruebas() {
           let m;
           if (sql === 'SELECT DATABASE() AS base') return [[{ base: c.base }]];
           if (sql === 'SELECT IS_USED_LOCK(?) AS dueno, CONNECTION_ID() AS propio') return [[{ dueno: 77, propio: c.id }]];
-          if (sql.startsWith('SELECT TABLE_NAME AS tabla FROM information_schema.TABLES')) return [params[1].map(tabla => ({ tabla }))];
+          if (sql.startsWith('SELECT TABLE_NAME AS tabla FROM information_schema.TABLES')) {
+            return [params[1].filter(t => tablas005 || !['eventos_seguridad', 'restablecimientos_contrasena'].includes(t)).map(tabla => ({ tabla }))];
+          }
           if ((m = sql.match(/^INSERT INTO pansys_test\.(\w+) /))) {
             if (fallarInsertEn === m[1]) throw Object.assign(new Error('fallo'), { code: 'ER_SIMULADO' });
             if (m[1] === 'productos' && estado.bloqueoPanaderia && c.esperaCorta && v6Bloquea) {
@@ -473,7 +486,21 @@ function ejecutarPruebas() {
             if (m[1] === 'productos') estado.productos[id] = params[0];
             if (m[1] === 'panaderias') estado.panaderias.push(id);
             if (m[1] === 'materia_prima') estado.materias[params[1]] = (estado.materias[params[1]] ?? 0) + 1;
+            if (m[1] === 'eventos_seguridad') estado.eventos005.push({ id, usuario: params[0], panaderia: params[1], actor: params[2] });
+            if (m[1] === 'restablecimientos_contrasena') estado.enlaces005.push({ id, usuario: params[0], solicitante: params[2] });
             return [{ insertId: id, affectedRows: 1 }];
+          }
+          if ((m = sql.match(/^UPDATE pansys_test\.(eventos_seguridad SET actor_id|restablecimientos_contrasena SET origen = 'propio', solicitado_por) = NULL/))) {
+            const [filas, campo] = m[1].startsWith('eventos') ? [estado.eventos005, 'actor'] : [estado.enlaces005, 'solicitante'];
+            const fila = filas.find(f => f.id === params[0] && f.usuario === params[1] && f[campo] === params[2]);
+            if (fila) fila[campo] = null;
+            return [{ affectedRows: fila ? 1 : 0 }];
+          }
+          if (sql.startsWith('SELECT COUNT(*) AS n FROM pansys_test.eventos_seguridad WHERE usuario_id IN (?) OR actor_id IN (?)')) {
+            return [[{ n: contar005(estado.eventos005, params[0], 'actor') }]];
+          }
+          if (sql.startsWith('SELECT COUNT(*) AS n FROM pansys_test.restablecimientos_contrasena WHERE usuario_id IN (?) OR solicitado_por IN (?)')) {
+            return [[{ n: contar005(estado.enlaces005, params[0], 'solicitante') }]];
           }
           if (sql.startsWith('SELECT @@SESSION.transaction_isolation')) {
             return [[{ aislamiento, aislamiento_global: aislamientoGlobal, espera: 50 }]];
@@ -538,6 +565,27 @@ function ejecutarPruebas() {
       ejecucion.crearCuenta = async () => ejecucion.registrar('usuarios', ++estado.ids);
       ejecucion.crearPanaderia = async () => ejecucion.registrar('panaderias', ++estado.ids);
       ejecucion.asignarPanaderia = async ({ cuentaId, panaderiaId }) => { estado.asignaciones[cuentaId] = panaderiaId; return cuentaId; };
+      // V16: las comprobaciones de dependencias mixtas de aislamiento.js (con panaderías vacías), en
+      // su mismo orden, sobre las filas del doble. Solo lee. v16Detecta = false simula que no detectan.
+      ejecucion.llamadas.comprobar = 0;
+      ejecucion.comprobarAntesDeBorrar = async ({ usuarios }) => {
+        ejecucion.llamadas.comprobar++;
+        const dentro = (id) => usuarios.includes(id);
+        const fuera = (id) => id !== null && !usuarios.includes(id);
+        const casos = [
+          [estado.eventos005.filter(f => dentro(f.usuario) && fuera(f.actor)), 'evento de una cuenta propia con un actor ajeno'],
+          [estado.eventos005.filter(f => dentro(f.actor) && fuera(f.usuario)), 'evento de una cuenta ajena con un actor propio'],
+          [estado.eventos005.filter(f => dentro(f.usuario) && f.panaderia !== null), 'evento de una cuenta propia en una panadería ajena'],
+          [estado.enlaces005.filter(f => dentro(f.usuario) && fuera(f.solicitante)), 'enlace de una cuenta propia solicitado por una cuenta ajena'],
+          [estado.enlaces005.filter(f => dentro(f.solicitante) && fuera(f.usuario)), 'enlace de una cuenta ajena solicitado por una cuenta propia']
+        ];
+        for (const [filas, descripcion] of casos) {
+          if (v16Detecta && filas.length) throw new ErrorAislamiento(`Dependencia mixta: ${filas.length} ${descripcion}`);
+        }
+        return ['eventos_seguridad', 'restablecimientos_contrasena'];
+      };
+      // Los pasos y su orden son los del módulo real (método sin estado de conexión)
+      ejecucion.pasosDeBorrado = (tablas, propios) => Ejecucion.prototype.pasosDeBorrado.call(ejecucion, tablas, propios);
       ejecucion.limpiar = async () => {
         ejecucion.llamadas.limpiar++;
         estado.eventos.push('limpiar');
@@ -566,8 +614,15 @@ function ejecutarPruebas() {
       const e = crearEscenario();
       const codigo = await e.correr();
       igual('flujo correcto -> código 0 y todas las comprobaciones OK', [codigo, e.salida.filter(l => l.startsWith('FALLA'))], [0, []]);
-      igual('se informan V1-V8 y V10-V15',
-        [...new Set(lineasOk(e.salida))].filter(c => c !== '--').sort(), ['V1', 'V10', 'V11', 'V12', 'V13', 'V14', 'V15', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8']);
+      igual('se informan V1-V8 y V10-V16',
+        [...new Set(lineasOk(e.salida))].filter(c => c !== '--').sort(), ['V1', 'V10', 'V11', 'V12', 'V13', 'V14', 'V15', 'V16', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8']);
+      igual('V16: 10 comprobaciones OK, comprobarAntesDeBorrar 6 veces y dos UPDATE de desvinculación en la conexión de datos',
+        [e.salida.filter(l => l.startsWith('OK    V16')).length, e.ejecucion.llamadas.comprobar,
+          e.estado.conexiones[0].registro.filter(s => /^UPDATE pansys_test\.(eventos_seguridad|restablecimientos_contrasena) /.test(s)).length],
+        [10, 6, 2]);
+      igual('V16: 4 eventos (2 sin actor tras desvincular) y 2 enlaces (1 sin solicitante tras desvincular)',
+        [e.estado.eventos005.length, e.estado.enlaces005.length, e.estado.eventos005.filter(f => f.actor === null).length, e.estado.enlaces005.filter(f => f.solicitante === null).length],
+        [4, 2, 2, 1]);
       igual('V11-V13 usan las sentencias exactas de aislamiento.js (detalles ajenos 2 veces, bloqueo de productos 2 veces)',
         [e.estado.todas.filter(s => s === SQL_DETALLES_AJENOS).length, e.estado.todas.filter(s => s === SQL_BLOQUEO_PRODUCTOS).length], [2, 2]);
       const aux = e.estado.conexiones[1];
@@ -590,10 +645,24 @@ function ejecutarPruebas() {
       igual('las conexiones auxiliares se cierran antes de limpiar y todas terminan cerradas',
         [e.estado.eventos.slice(0, iLimpiar).filter(x => x.startsWith('fin:')).length >= 3, todasCerradas(e.estado)], [true, true]);
       igual('los datos se crean solo con el bloqueo exigido', e.ejecucion.llamadas.exigirBloqueo >= 1, true);
-      igual('dos cuentas por SQL propio y, en V15, dos más y una panadería con las escrituras del módulo; todas propias',
-        [e.estado.todas.filter(s => s.startsWith('INSERT INTO pansys_test.usuarios')).length, e.ejecucion.propios.usuarios.length, e.ejecucion.propios.panaderias.length], [2, 4, 3]);
+      igual('dos cuentas por SQL propio y, en V15 y V16, cuatro más y una panadería con las escrituras del módulo; todas propias',
+        [e.estado.todas.filter(s => s.startsWith('INSERT INTO pansys_test.usuarios')).length, e.ejecucion.propios.usuarios.length, e.ejecucion.propios.panaderias.length], [2, 6, 3]);
       igual('V15: la administradora queda asignada a la panadería creada para ella',
         Object.entries(e.estado.asignaciones).map(([c, p]) => [Number(c), p]), [[e.ejecucion.propios.usuarios[2], e.ejecucion.propios.panaderias[2]]]);
+    }
+    {
+      const e = crearEscenario({ v16Detecta: false });
+      const codigo = await e.correr();
+      igual('si la limpieza no detectara la dependencia mixta -> FALLA V16 (4 veces) y código 1, con una sola limpieza',
+        [codigo, e.salida.filter(l => l.startsWith('FALLA V16') && l.includes('no abortó')).length, e.ejecucion.llamadas.limpiar], [1, 4, 1]);
+    }
+    {
+      const e = crearEscenario({ tablas005: false, borrados: PREVISTOS_SIN_005 });
+      const codigo = await e.correr();
+      igual('sin las tablas del SQL 005 -> FALLA V16 sin escribir en ellas; V5 compara solo los pasos existentes (OK)',
+        [codigo, e.salida.filter(l => l.startsWith('FALLA')).map(l => l.split(' ').filter(Boolean)[1]), e.estado.todas.some(s => /pansys_test\.(eventos_seguridad|restablecimientos_contrasena)/.test(s)),
+          e.salida.some(l => l.startsWith('OK    V5 limpiar() borra'))],
+        [1, ['V16'], false, true]);
     }
     {
       const e = crearEscenario({ resultado: 'desconocido' });

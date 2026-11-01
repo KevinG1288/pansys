@@ -9,7 +9,9 @@
 //    ellas por clave foránea; nunca rangos de id, patrones de nombre ni tablas completas.
 // 3. Limpieza transaccional en la conexión dedicada: comprobaciones previas (base, bloqueo,
 //    marcas y dependencias ajenas, incluidos los detalles de ventas ajenas que referencien
-//    productos propios y que el ON DELETE CASCADE borraría), borrado en orden de claves foráneas
+//    productos propios y que el ON DELETE CASCADE borraría, y las dependencias mixtas de las tablas
+//    de recuperación del SQL 005: eventos o enlaces que relacionen una cuenta o panadería propia
+//    con una ajena abortan la limpieza), borrado en orden de claves foráneas
 //    con recuento previo y verificación de filas afectadas, comprobación de que no queda ninguna
 //    fila propia y nueva comprobación del bloqueo antes del COMMIT.
 //    Un administrador por panadería: la panadería necesita una propietaria (usuario_id NOT NULL)
@@ -575,7 +577,7 @@ class Ejecucion {
         borrados[paso.descripcion] = Number(n);
       }
       // Ninguna fila propia puede seguir existiendo antes del COMMIT
-      await this.#comprobarSinRestos(propios);
+      await this.#comprobarSinRestos(propios, tablasOpcionales);
       // El bloqueo debe seguir siendo nuestro hasta el final
       await this.#bloqueo.verificar();
       commitEnviado = true;
@@ -701,11 +703,54 @@ class Ejecucion {
       }
     }
 
-    const existentes = await this.#bloqueo.consultar(
+    const existentes = (await this.#bloqueo.consultar(
       'SELECT TABLE_NAME AS tabla FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN (?)',
       [BASE, TABLAS_OPCIONALES]
-    );
-    return existentes.map(f => f.tabla ?? f.TABLE_NAME);
+    )).map(f => f.tabla ?? f.TABLE_NAME);
+    await this.#comprobarDependenciasMixtas(existentes, usuarios, panaderias, contar);
+    return existentes;
+  }
+
+  // Filas de recuperación (SQL 005) que relacionan lo propio con lo ajeno: borrarlas perdería datos
+  // ajenos (p. ej. que una cuenta ajena actuó) y dejarlas haría fallar la limpieza a medias por
+  // RESTRICT. Cualquiera de ellas aborta la limpieza (ROLLBACK, cero filas borradas). Las cuentas y
+  // panaderías propias ya están bloqueadas (FOR UPDATE): nadie puede añadir filas que las referencien
+  // mientras dura la transacción. Solo condiciones con AND; NOT IN no es verdadero con NULL, así que
+  // un actor, solicitante o panadería NULL no cuenta como ajeno.
+  async #comprobarDependenciasMixtas(existentes, usuarios, panaderias, contar) {
+    if (!usuarios.length) return;
+    const casos = [];
+    if (existentes.includes('eventos_seguridad')) {
+      const t = tabla('eventos_seguridad');
+      casos.push(
+        [`SELECT COUNT(*) AS n FROM ${t} WHERE usuario_id IN (?) AND actor_id NOT IN (?)`, [usuarios, usuarios],
+          'evento de una cuenta propia con un actor ajeno'],
+        [`SELECT COUNT(*) AS n FROM ${t} WHERE actor_id IN (?) AND usuario_id NOT IN (?)`, [usuarios, usuarios],
+          'evento de una cuenta ajena con un actor propio'],
+        panaderias.length
+          ? [`SELECT COUNT(*) AS n FROM ${t} WHERE usuario_id IN (?) AND panaderia_id NOT IN (?)`, [usuarios, panaderias],
+            'evento de una cuenta propia en una panadería ajena']
+          : [`SELECT COUNT(*) AS n FROM ${t} WHERE usuario_id IN (?) AND panaderia_id IS NOT NULL`, [usuarios],
+            'evento de una cuenta propia en una panadería ajena']
+      );
+      if (panaderias.length) {
+        casos.push([`SELECT COUNT(*) AS n FROM ${t} WHERE panaderia_id IN (?) AND usuario_id NOT IN (?)`, [panaderias, usuarios],
+          'evento de una cuenta ajena en una panadería propia']);
+      }
+    }
+    if (existentes.includes('restablecimientos_contrasena')) {
+      const t = tabla('restablecimientos_contrasena');
+      casos.push(
+        [`SELECT COUNT(*) AS n FROM ${t} WHERE usuario_id IN (?) AND solicitado_por NOT IN (?)`, [usuarios, usuarios],
+          'enlace de una cuenta propia solicitado por una cuenta ajena'],
+        [`SELECT COUNT(*) AS n FROM ${t} WHERE solicitado_por IN (?) AND usuario_id NOT IN (?)`, [usuarios, usuarios],
+          'enlace de una cuenta ajena solicitado por una cuenta propia']
+      );
+    }
+    for (const [sql, params, descripcion] of casos) {
+      const n = await contar(sql, params);
+      if (n) throw new ErrorAislamiento(`Dependencia mixta: ${n} ${descripcion}`);
+    }
   }
 
   // Una administradora propia que es propietaria de una panadería propia y está asignada a una
@@ -726,11 +771,25 @@ class Ejecucion {
   }
 
   // Después de borrar y antes del COMMIT: no queda ninguna cuenta, panadería ni producto propio
-  async #comprobarSinRestos({ usuarios, panaderias, productos }) {
+  async #comprobarSinRestos({ usuarios, panaderias, productos }, tablasOpcionales = []) {
     for (const [nombre, ids] of [['usuarios', usuarios], ['panaderias', panaderias], ['productos', productos]]) {
       if (!ids.length) continue;
       const n = Number((await this.#bloqueo.consultar(`SELECT COUNT(*) AS n FROM ${tabla(nombre)} WHERE id IN (?)`, [ids]))[0].n);
       if (n) throw new ErrorAislamiento(`Quedan ${n} filas propias en ${nombre} después de borrar`);
+    }
+    // Tablas de recuperación: ninguna fila puede seguir referenciando lo propio (columna a columna)
+    const referencias = [];
+    if (tablasOpcionales.includes('eventos_seguridad')) {
+      referencias.push(['eventos_seguridad', 'usuario_id', usuarios], ['eventos_seguridad', 'actor_id', usuarios],
+        ['eventos_seguridad', 'panaderia_id', panaderias]);
+    }
+    if (tablasOpcionales.includes('restablecimientos_contrasena')) {
+      referencias.push(['restablecimientos_contrasena', 'usuario_id', usuarios], ['restablecimientos_contrasena', 'solicitado_por', usuarios]);
+    }
+    for (const [nombre, columna, ids] of referencias) {
+      if (!ids.length) continue;
+      const n = Number((await this.#bloqueo.consultar(`SELECT COUNT(*) AS n FROM ${tabla(nombre)} WHERE ${columna} IN (?)`, [ids]))[0].n);
+      if (n) throw new ErrorAislamiento(`Quedan ${n} filas de ${nombre} que referencian lo propio (${columna})`);
     }
   }
 
@@ -752,11 +811,30 @@ class Ejecucion {
       );
     }
     if (usuarios.length) {
+      // Tablas de recuperación (SQL 005): solo condiciones con AND. Cada paso cubre una combinación
+      // válida de actor/solicitante y panadería (NULL o propios); las mixtas ya abortaron antes.
       if (tablasOpcionales.includes('eventos_seguridad')) {
-        pasos.push({ descripcion: 'eventos_seguridad', tabla: 'eventos_seguridad', where: 'usuario_id IN (?) OR actor_id IN (?)', params: [usuarios, usuarios] });
+        const eventos = [
+          ['sin actor ni panadería', 'usuario_id IN (?) AND actor_id IS NULL AND panaderia_id IS NULL', [usuarios]],
+          ['actor propio, sin panadería', 'usuario_id IN (?) AND actor_id IN (?) AND panaderia_id IS NULL', [usuarios, usuarios]]
+        ];
+        if (panaderias.length) {
+          eventos.push(
+            ['sin actor, panadería propia', 'usuario_id IN (?) AND actor_id IS NULL AND panaderia_id IN (?)', [usuarios, panaderias]],
+            ['actor propio, panadería propia', 'usuario_id IN (?) AND actor_id IN (?) AND panaderia_id IN (?)', [usuarios, usuarios, panaderias]]
+          );
+        }
+        for (const [caso, where, params] of eventos) {
+          pasos.push({ descripcion: `eventos_seguridad (${caso})`, tabla: 'eventos_seguridad', where, params });
+        }
       }
       if (tablasOpcionales.includes('restablecimientos_contrasena')) {
-        pasos.push({ descripcion: 'restablecimientos_contrasena', tabla: 'restablecimientos_contrasena', where: 'usuario_id IN (?) OR solicitado_por IN (?)', params: [usuarios, usuarios] });
+        pasos.push(
+          { descripcion: 'restablecimientos_contrasena (sin solicitante)', tabla: 'restablecimientos_contrasena',
+            where: 'usuario_id IN (?) AND solicitado_por IS NULL', params: [usuarios] },
+          { descripcion: 'restablecimientos_contrasena (solicitante propio)', tabla: 'restablecimientos_contrasena',
+            where: 'usuario_id IN (?) AND solicitado_por IN (?)', params: [usuarios, usuarios] }
+        );
       }
       pasos.push({ descripcion: 'usuarios (empleados)', tabla: 'usuarios', where: 'id IN (?) AND panaderia_id IS NOT NULL', params: [usuarios] });
     }
