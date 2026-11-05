@@ -15,6 +15,11 @@ const Panaderia = sequelize.define('Panaderia', {
     type: DataTypes.STRING,
     allowNull: false
   },
+  // SQL 006: localidad o barrio (NULL o texto no vacío, CHECK chk_panaderias_localidad)
+  localidad: {
+    type: DataTypes.STRING(100),
+    allowNull: true
+  },
   telefono: {
     type: DataTypes.STRING
   },

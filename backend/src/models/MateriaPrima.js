@@ -39,6 +39,12 @@ const MateriaPrima = sequelize.define('MateriaPrima', {
   estado: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  // SQL 006: concurrencia optimista. Toda escritura de la fila la incrementa (CHECK < 4294967295).
+  version_fila: {
+    type: DataTypes.INTEGER.UNSIGNED,
+    allowNull: false,
+    defaultValue: 0
   }
 }, {
   tableName: 'materia_prima',

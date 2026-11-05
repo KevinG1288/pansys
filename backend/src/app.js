@@ -11,6 +11,7 @@ const ventasRoutes = require('./modules/ventas/ventas.routes');
 const produccionRoutes = require('./modules/produccion/produccion.routes');
 const usuariosRoutes = require('./modules/usuarios/usuarios.routes');
 const panaderiasRoutes = require('./modules/panaderias/panaderias.routes');
+const redRoutes = require('./modules/red/red.routes');
 
 // PANSYS_MODO_DEMO y PANSYS_SERVIR_FRONTEND (ver config/arranque.js y DEMO.md)
 const opciones = leerOpciones();
@@ -26,6 +27,7 @@ app.use('/api/ventas', ventasRoutes);
 app.use('/api/produccion', produccionRoutes);
 app.use('/api/usuarios', usuariosRoutes);
 app.use('/api/panaderias', panaderiasRoutes);
+app.use('/api/red', redRoutes);
 
 if (opciones.servirFrontend) {
   // Un solo origen: la interfaz compilada y la API en el mismo puerto (sin CORS de por medio)
