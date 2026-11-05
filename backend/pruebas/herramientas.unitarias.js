@@ -70,7 +70,12 @@ function ejecutarPruebas() {
       detalle_ventas: [col('id'), col('venta_id'), col('producto_id')],
       receta_producto: [col('id'), col('producto_id'), col('materia_prima_id')],
       orden_produccion: [col('id'), col('panaderia_id')],
-      insumo_usado: [col('id'), col('orden_id')]
+      insumo_usado: [col('id'), col('orden_id')],
+      red_parejas: [col('panaderia_menor_id'), col('panaderia_mayor_id'), col('pendientes')],
+      solicitudes_red: [col('id'), col('estado', 'varchar(20)')],
+      solicitudes_red_detalle: [col('id'), col('solicitud_id')],
+      movimientos_red: [col('id'), col('cantidad', 'decimal(12,4)')],
+      eventos_red: [col('id'), col('tipo', 'varchar(20)')]
     };
     const tablas = {
       roles: [{ id: 1, nombre: 'administrador' }, { id: 2, nombre: 'panadero' }, { id: 3, nombre: 'gerente' }],
@@ -90,7 +95,10 @@ function ejecutarPruebas() {
       detalle_ventas: [{ id: 1, venta_id: 1, producto_id: 1 }],
       receta_producto: [{ id: 1, producto_id: 1, materia_prima_id: 1 }],
       orden_produccion: [{ id: 1, panaderia_id: 1 }],
-      insumo_usado: [{ id: 1, orden_id: 1 }]
+      insumo_usado: [{ id: 1, orden_id: 1 }],
+      red_parejas: [{ panaderia_menor_id: 1, panaderia_mayor_id: 2, pendientes: 1 }],
+      solicitudes_red: [{ id: 1, estado: 'pendiente' }], solicitudes_red_detalle: [{ id: 1, solicitud_id: 1 }],
+      movimientos_red: [{ id: 1, cantidad: 1 }], eventos_red: [{ id: 1, tipo: 'creada' }]
     };
     return { esquema, tablas };
   };
@@ -119,13 +127,15 @@ function ejecutarPruebas() {
         return [params[1].flatMap(t => (db.esquema[t] ?? []).map(x => ({ tabla: t, ...x })))];
       }
       let m;
-      if ((m = s.match(/^SELECT COUNT\(\*\) AS filas, MIN\(id\) AS id_min, MAX\(id\) AS id_max, BIT_XOR\(CRC32\(.+\)\) AS xor_crc, SUM\(CRC32\(.+\)\) AS suma_crc FROM pansys_test\.`(\w+)`$/))) {
+      if ((m = s.match(/^SELECT COUNT\(\*\) AS filas, MIN\(.+?\) AS id_min, MAX\(.+?\) AS id_max, BIT_XOR\(CRC32\(.+\)\) AS xor_crc, SUM\(CRC32\(.+\)\) AS suma_crc FROM pansys_test\.`(\w+)`$/))) {
         const filas = db.tablas[m[1]];
+        if (m[1] === 'red_parejas' && /MIN\(id\)/.test(s)) throw new Error('red_parejas no tiene id');
+        const ids = filas.map(f => m[1] === 'red_parejas' ? String(f.panaderia_menor_id).padStart(10, '0') + '/' + String(f.panaderia_mayor_id).padStart(10, '0') : f.id).sort((a,b) => typeof a === 'number' ? a-b : a.localeCompare(b));
         const crcs = filas.map(f => crcFila(db, m[1], f));
         return [[{
           filas: String(filas.length),
-          id_min: filas.length ? String(Math.min(...filas.map(f => f.id))) : null,
-          id_max: filas.length ? String(Math.max(...filas.map(f => f.id))) : null,
+          id_min: filas.length ? String(ids[0]) : null,
+          id_max: filas.length ? String(ids.at(-1)) : null,
           xor_crc: String(crcs.reduce((a, b) => (a ^ b) >>> 0, 0)),
           suma_crc: filas.length ? String(crcs.reduce((a, b) => a + BigInt(b), 0n)) : null
         }]];
@@ -164,6 +174,67 @@ function ejecutarPruebas() {
   const marcas = (r, tipo) => (r.stderr.match(new RegExp(`<<${tipo}:[^>]*>>`, 'g')) ?? []);
 
   const main = async () => {
+    console.log('\n== E1e: barreras sin conexion');
+    const red = require('./red.pruebas');
+    const daemon = { TYPE: 'FOREGROUND', PROCESSLIST_COMMAND: 'Daemon', CONNECTION_TYPE: null, PROCESSLIST_DB: null };
+    const scheduler = { ...daemon, NAME: 'thread/sql/event_scheduler', PROCESSLIST_USER: 'event_scheduler', PROCESSLIST_HOST: 'localhost' };
+    const gtid = { ...daemon, NAME: 'thread/sql/compress_gtid_table', PROCESSLIST_USER: null, PROCESSLIST_HOST: null };
+    igual('solo daemons internos acreditados sin eventos se excluyen', red.clasificarSesiones([scheduler, gtid]).peligrosas.length, 0);
+    for (const f of [{ ...scheduler, NAME: 'thread/sql/one_connection' }, { ...gtid, CONNECTION_TYPE: 'TCP/IP' },
+      { ...gtid, PROCESSLIST_USER: 'root' }, { ...scheduler, PROCESSLIST_COMMAND: 'Sleep' },
+      { ...scheduler, PROCESSLIST_DB: 'pansys_test' }, { ...gtid, PROCESSLIST_HOST: 'localhost' }]) {
+      igual('atributos de cliente o daemon desconocido siguen bloqueando', red.clasificarSesiones([f]).peligrosas.length, 1);
+    }
+    igual('scheduler con eventos habilitados no se excluye', red.clasificarSesiones([scheduler], 1).peligrosas.length, 1);
+    const lecturaSesiones = async sql => sql.includes('performance_schema.threads') ? [scheduler, gtid] : [{ n: 0 }];
+    igual('comprobacion completa admite internos acreditados y cero transacciones', (await red.comprobarSesiones(lecturaSesiones)).length, 2);
+    igual('transaccion ajena impide continuar', (await falla(() => red.comprobarSesiones(async sql => sql.includes('INNODB_TRX') ? [{n:1}] : lecturaSesiones(sql)))) instanceof Error, true);
+    igual('E1e tiene diez escenarios', red.ESCENARIOS.length, 10);
+    const evidencia = path.join(require('os').tmpdir(), 'pansys-e1e-unitario-' + process.pid);
+    const argvRed = ['--ejecutar', '--evidencia', evidencia];
+    igual('E1e valida un destino nuevo externo sin crearlo', red.validarInicio(argvRed, { DB_NAME: 'pansys_test' }), evidencia);
+    igual('validar no crea evidencias', fs.existsSync(evidencia), false);
+    for (const [args, env] of [[[],{}], [argvRed,{}], [argvRed,{DB_NAME:'pansys_db'}],
+      [argvRed,{DB_NAME:'pansys_test',PANSYS_MODO_DEMO:'1'}], [argvRed,{DB_NAME:'pansys_test',PANSYS_SERVIR_FRONTEND:''}],
+      [['--ejecutar','--evidencia',RAIZ],{DB_NAME:'pansys_test'}], [['--ejecutar','--evidencia',require('os').tmpdir()],{DB_NAME:'pansys_test'}]]) {
+      igual('E1e rechaza argumentos/base/modo/ruta inseguros', (await falla(() => red.validarInicio(args,env))) instanceof Error, true);
+    }
+    igual('ejecutar E1e sin autorizacion explicita falla antes de cargar modelos', (await falla(() => red.ejecutar([],{}))) instanceof Error, true);
+    let consultasBarrera = 0;
+    await red.esperarCondicion(async () => ++consultasBarrera === 2, 500);
+    igual('sincronizacion espera confirmacion observable', consultasBarrera, 2);
+    igual('sin confirmacion la sincronizacion falla', (await falla(() => red.esperarCondicion(async () => false, 1))) instanceof Error, true);
+    for (const modo of ['correcta', 'sinEspera', 'observadorFalla']) {
+      const hooks = {}; let retenido = false, terminado = false, observado = false, avisar;
+      const finPrimero = new Promise(r => { avisar = r; });
+      const doble = {
+        addHook: (tipo, nombre, fn) => { hooks[tipo] = fn; },
+        removeHook: tipo => { delete hooks[tipo]; }
+      };
+      const primero = async () => {
+        retenido = true;
+        await hooks.afterQuery({ transaction: {} }, { sql: 'materia FOR UPDATE', connection: { threadId: 101 } });
+        retenido = false; avisar(); return 'primero';
+      };
+      const segundo = async () => {
+        hooks.beforeQuery({ transaction: {} }, { connection: { threadId: 102 } });
+        await finPrimero; terminado = true; return 'segundo';
+      };
+      const leer = async (sql, ids) => {
+        if (modo === 'observadorFalla') throw new Error('sin permiso');
+        return retenido && !terminado && ids[0] === 101 && ids[1] === 102 && modo === 'correcta' ? [{ espera: 1 }] : [];
+      };
+      const error = await falla(() => red.carreraControlada({ sequelize: doble, leer, patron: /FOR UPDATE/, primero, segundo,
+        nombre: 'unitaria', limite: 30, alObservar: () => { observado = retenido && !terminado; } }));
+      igual(`barrera ${modo}: prueba resultado y observacion`, [error instanceof Error, observado], modo === 'correcta' ? [false,true] : [true,false]);
+      igual(`barrera ${modo}: siempre libera actores y hooks`, [retenido, terminado, Object.keys(hooks)], [false,true,[]]);
+    }
+    const codigoRed = fs.readFileSync(require.resolve('./red.pruebas'), 'utf8');
+    igual('concurrencia observa dos conexiones identificadas en data_lock_waits',
+      [codigoRed.includes('performance_schema.data_lock_waits'), codigoRed.includes('r.PROCESSLIST_ID = ?'), codigoRed.includes("sequelize.addHook('afterQuery'")], [true,true,true]);
+    igual('el exito requiere diez escenarios, limpieza y fotos iguales',
+      [codigoRed.includes('manifiesto.escenarios.length === 10'), codigoRed.includes('limpiezaCorrecta(manifiesto.limpieza)'), codigoRed.includes('manifiesto.comparacion?.sinDiferencias === true')], [true,true,true]);
+
     // ================= Foto =================
     console.log('\n== Foto: solo lectura y base correcta');
     {
@@ -213,8 +284,9 @@ function ejecutarPruebas() {
       igual('CHECKSUM TABLE va después de todas las lecturas de la instantánea', iChecksum > iUltimaLectura, true);
       igual('la contraseña solo se usa dentro de CRC32 o en la comparación con la semilla',
         sentencias.filter(s => s.includes('contrasena')).every(s => /^SELECT COUNT\(\*\) AS filas/.test(s) || s.includes("(contrasena = '!') AS contrasena_es_semilla")), true);
-      igual('la foto contiene las 10 tablas, con sus recuentos', Object.fromEntries(Object.entries(f.tablas).map(([t, d]) => [t, d.filas])), {
-        roles: 3, usuarios: 4, panaderias: 2, materia_prima: 1, productos: 2, ventas: 1, detalle_ventas: 1, receta_producto: 1, orden_produccion: 1, insumo_usado: 1
+      igual('la foto contiene las 15 tablas, con sus recuentos', Object.fromEntries(Object.entries(f.tablas).map(([t, d]) => [t, d.filas])), {
+        roles: 3, usuarios: 4, panaderias: 2, materia_prima: 1, productos: 2, ventas: 1, detalle_ventas: 1, receta_producto: 1, orden_produccion: 1, insumo_usado: 1,
+        red_parejas: 1, solicitudes_red: 1, solicitudes_red_detalle: 1, movimientos_red: 1, eventos_red: 1
       });
       igual('cuentas 1-4: datos no sensibles e indicador de contraseña de la semilla', f.usuarios_semilla.map(u => [u.id, u.version_sesion, u.contrasena_es_semilla]),
         [[1, 0, true], [2, 0, true], [3, 0, true], [4, 2, false]]);
@@ -242,6 +314,8 @@ function ejecutarPruebas() {
       const despuesIgual = { ...(await variante(() => {})), tomada_en: '2099-01-01T00:00:00.000Z' };
       igual('mismos datos (con otra hora de captura) -> sin diferencias', foto.compararFotos(antes, despuesIgual), { sinDiferencias: true, diferencias: [] });
       const casos = [
+        ...['red_parejas', 'solicitudes_red', 'solicitudes_red_detalle', 'movimientos_red', 'eventos_red'].map(t => [
+          'restos en ' + t, db => db.tablas[t].push({ ...db.tablas[t][0], id: 99, panaderia_mayor_id: 99 }), new RegExp(t + ': filas 1 -> 2')]),
         ['cambia el precio de un producto ajeno', (db) => { db.tablas.productos[1].precio_venta = 2100; }, /productos: (xor_crc|suma_crc|checksum)/],
         ['se añade una fila', (db) => { db.tablas.ventas.push({ id: 2, panaderia_id: 1 }); }, /ventas: filas 1 -> 2/],
         ['se borra una fila', (db) => { db.tablas.productos.pop(); }, /productos: filas 2 -> 1/],
@@ -265,6 +339,14 @@ function ejecutarPruebas() {
       }
     }
 
+    {
+      const { resultado: completa } = await fotoDe(baseDoble());
+      const incompleta = copiar(completa); delete incompleta.tablas.red_parejas;
+      igual('dos fotos sin SQL006 no se aceptan como iguales', foto.compararFotos(incompleta, incompleta).sinDiferencias, false);
+      igual('PK compuesta tiene extremos completos', [completa.tablas.red_parejas.id_min, completa.tablas.red_parejas.id_max], ['0000000001/0000000002','0000000001/0000000002']);
+      const db = baseDoble(); db.tablas.red_parejas[0].pendientes = 2;
+      igual('detecta cambio ajeno del contador aunque no cambien IDs', foto.compararFotos(completa, (await fotoDe(db)).resultado).sinDiferencias, false);
+    }
     console.log('\n== Foto: archivo de salida');
     {
       igual('una ruta dentro del repositorio se rechaza', (await falla(() => foto.validarRutaSalida(path.join(RAIZ, 'backend', 'foto.json')))) instanceof foto.ErrorFoto, true);

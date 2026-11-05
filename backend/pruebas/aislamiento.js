@@ -20,6 +20,8 @@
 //    panaderias.usuario_id CASCADE) se deshace en la limpieza, antes de borrar, desasignando a las
 //    propietarias propias.
 //    Ante cualquier duda: ROLLBACK, y los registros temporales quedan para revisión posterior.
+// 4. SQL006: creación opcional en red; descubrimiento bloqueante de referencias por panadería,
+//    actor y materia; rechazo de mezclas; limpieza por IDs exactos y PK compuesta de parejas.
 //
 // El bloqueo no excluye a otros procesos que escriban en pansys_test (demo, npm run dev,
 // Workbench): por eso la limpieza solo alcanza filas propias y no se ejecutan suites en la demo.
@@ -33,12 +35,14 @@ const DOMINIO_CORREO = 'pansys.test';
 const MAX_ID_SEMILLA = { usuarios: 4, panaderias: 2 };
 // Tablas del SQL 005 (aún no existen en pansys_test): se limpian solo si existen
 const TABLAS_OPCIONALES = ['eventos_seguridad', 'restablecimientos_contrasena'];
+const TABLAS_RED = ['red_parejas', 'solicitudes_red', 'solicitudes_red_detalle', 'movimientos_red', 'eventos_red'];
 
 // Escrituras protegidas: las ÚNICAS sentencias de escritura del módulo, aparte del DELETE y de la
 // desasignación de la limpieza. No se acepta SQL de fuera. Contraseña '!' (no es un hash: no
 // permite iniciar sesión).
 const PLANTILLA_CUENTA = "INSERT INTO pansys_test.usuarios (email, contrasena, rol_id, panaderia_id, estado, version_sesion, createdAt, updatedAt) VALUES (?, '!', ?, ?, ?, 0, NOW(), NOW())";
 const PLANTILLA_PANADERIA = "INSERT INTO pansys_test.panaderias (nombre, direccion, telefono, en_red, usuario_id, createdAt, updatedAt) VALUES (?, 'Dirección temporal de pruebas', NULL, 0, ?, NOW(), NOW())";
+const PLANTILLA_PANADERIA_RED = "INSERT INTO pansys_test.panaderias (nombre, direccion, telefono, en_red, usuario_id, createdAt, updatedAt) VALUES (?, 'Dirección temporal de pruebas', NULL, 1, ?, NOW(), NOW())";
 // Producto temporal, solo en una panadería propia (precio_compra fijo en 0)
 const PLANTILLA_PRODUCTO = 'INSERT INTO pansys_test.productos (nombre, precio_compra, precio_venta, cantidad_disponible, panaderia_id, estado, createdAt, updatedAt) VALUES (?, 0, ?, ?, ?, ?, NOW(), NOW())';
 // Asignación de una panadería propia a una administradora propia creada sin panadería. Parámetros:
@@ -364,7 +368,8 @@ class Ejecucion {
     throw new ErrorAislamiento(`usuarios: ${motivo}. No se reintenta`);
   }
 
-  async #escribirPanaderia({ etiqueta, propietariaId }) {
+  async #escribirPanaderia({ etiqueta, propietariaId, enRed = false }) {
+    if (typeof enRed !== 'boolean') throw new ErrorAislamiento('enRed debe ser true o false');
     if (typeof etiqueta !== 'string' || !ETIQUETA_PANADERIA.test(etiqueta)) throw new ErrorAislamiento(`Etiqueta de panadería no válida: ${JSON.stringify(etiqueta)}`);
     if (this.etiquetasUsadas.panaderias.has(etiqueta)) throw new ErrorAislamiento(`La etiqueta de panadería "${etiqueta}" ya se usó en esta ejecución`);
     if (!this.propios.usuarios.has(propietariaId)) {
@@ -373,7 +378,7 @@ class Ejecucion {
     await this.#comprobarAntesDeEscribir();
     const nombre = this.nombre(etiqueta);
     this.etiquetasUsadas.panaderias.add(etiqueta);
-    return this.#insertar('panaderias', [nombre, propietariaId], nombre);
+    return this.#insertar('panaderias', [nombre, propietariaId], nombre, enRed);
   }
 
   async #escribirProducto({ etiqueta, panaderiaId, precio, cantidad, activo }) {
@@ -447,9 +452,9 @@ class Ejecucion {
   //  - resultado incierto (sin respuesta válida o conexión perdida): la fila puede existir sin
   //    registrar. Se anota en escriturasInciertas; si además se perdió la conexión, se aborta;
   //    si no, se detienen las escrituras. Nunca se reintenta.
-  async #insertar(tipo, params, marca) {
+  async #insertar(tipo, params, marca, enRed = false) {
     // La plantilla la fija la tabla: no hay forma de enviar otra sentencia por esta vía
-    const plantilla = { usuarios: PLANTILLA_CUENTA, panaderias: PLANTILLA_PANADERIA, productos: PLANTILLA_PRODUCTO }[tipo];
+    const plantilla = { usuarios: PLANTILLA_CUENTA, panaderias: enRed ? PLANTILLA_PANADERIA_RED : PLANTILLA_PANADERIA, productos: PLANTILLA_PRODUCTO }[tipo];
     if (!plantilla) throw new ErrorAislamiento(`Tabla no permitida para escribir: ${JSON.stringify(tipo)}`);
     let resultado;
     try {
@@ -507,6 +512,7 @@ class Ejecucion {
       usuarios: this.ids('usuarios'),
       panaderias: this.ids('panaderias'),
       productos: [...this.productosPropios].sort((a, b) => a - b),
+      ...(this.redPropia ? { red: this.redPropia } : {}),
       escriturasInciertas: this.escriturasInciertas.map(e => ({ ...e }))
     };
   }
@@ -667,6 +673,7 @@ class Ejecucion {
     if (panaderias.length) {
       await this.#bloqueo.consultar(SQL_BLOQUEO_PRODUCTOS, [panaderias]);
     }
+    await this.#prepararRed(usuarios, panaderias);
 
     // Dependencias ajenas que la limpieza arrastraría o que la harían fallar a medias. Son lecturas
     // sin bloqueo: la instantánea se fija aquí, con todas las filas propias ya bloqueadas.
@@ -772,6 +779,10 @@ class Ejecucion {
 
   // Después de borrar y antes del COMMIT: no queda ninguna cuenta, panadería ni producto propio
   async #comprobarSinRestos({ usuarios, panaderias, productos }, tablasOpcionales = []) {
+    for (const paso of this.#pasosRed()) {
+      const n = Number((await this.#bloqueo.consultar(`SELECT COUNT(*) AS n FROM ${tabla(paso.tabla)} WHERE ${paso.where}`, paso.params))[0].n);
+      if (n) throw new ErrorAislamiento(`Quedan filas propias en ${paso.tabla}`);
+    }
     for (const [nombre, ids] of [['usuarios', usuarios], ['panaderias', panaderias], ['productos', productos]]) {
       if (!ids.length) continue;
       const n = Number((await this.#bloqueo.consultar(`SELECT COUNT(*) AS n FROM ${tabla(nombre)} WHERE id IN (?)`, [ids]))[0].n);
@@ -797,7 +808,7 @@ class Ejecucion {
   // (RESTRICT), después las cuentas empleadas, las panaderías y por último sus propietarias
   // (ya desasignadas por #desasignarPropietarias).
   pasosDeBorrado(tablasOpcionales, { usuarios, panaderias }) {
-    const pasos = [];
+    const pasos = this.redPropia ? this.#pasosRed() : [];
     const subconsulta = (madre) => `SELECT id FROM ${tabla(madre)} WHERE panaderia_id IN (?)`;
     if (panaderias.length) {
       pasos.push(
@@ -847,11 +858,70 @@ class Ejecucion {
     return pasos;
   }
 
+  // Padres propios ya bloqueados: las FK impiden añadir referencias durante la limpieza.
+  // Se inspecciona también por actor y materia para detectar dependencias mixtas en ambos sentidos.
+  async #prepararRed(usuarios, panaderias) {
+    const presentes = (await this.#bloqueo.consultar(
+      'SELECT TABLE_NAME AS tabla FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN (?)',
+      [BASE, TABLAS_RED])).map(f => f.tabla ?? f.TABLE_NAME);
+    this.redPropia = null;
+    if (!presentes.length) return; // Compatibilidad con suites anteriores a SQL006.
+    if (presentes.length !== TABLAS_RED.length) throw new ErrorAislamiento('SQL006 incompleto: no se limpia');
+    const leer = async (t, columnas, criterios) => {
+      const activos = criterios.filter(([, ids]) => ids.length);
+      if (!activos.length) return [];
+      return this.#bloqueo.consultar(`SELECT ${columnas} FROM ${tabla(t)} WHERE ${activos.map(([c]) => `${c} IN (?)`).join(' OR ')} FOR UPDATE`, activos.map(([, ids]) => ids));
+    };
+    const materias = await leer('materia_prima', 'id', [['panaderia_id', panaderias]]);
+    const mids = materias.map(m => Number(m.id));
+    const solicitudes = await leer('solicitudes_red', 'id, panaderia_solicitante_id, panaderia_proveedora_id, creada_por, cerrada_por',
+      [['panaderia_solicitante_id', panaderias], ['panaderia_proveedora_id', panaderias], ['creada_por', usuarios], ['cerrada_por', usuarios]]);
+    const sids = solicitudes.map(s => Number(s.id));
+    const detalles = await leer('solicitudes_red_detalle', 'id, solicitud_id, panaderia_solicitante_id, panaderia_proveedora_id, materia_prima_destino_id, materia_prima_origen_id',
+      [['solicitud_id', sids], ['panaderia_solicitante_id', panaderias], ['panaderia_proveedora_id', panaderias], ['materia_prima_destino_id', mids], ['materia_prima_origen_id', mids]]);
+    const dids = detalles.map(d => Number(d.id));
+    const movimientos = await leer('movimientos_red', 'id, detalle_id, panaderia_id, materia_prima_id, usuario_id',
+      [['detalle_id', dids], ['panaderia_id', panaderias], ['materia_prima_id', mids], ['usuario_id', usuarios]]);
+    const eventos = await leer('eventos_red', 'id, solicitud_id, panaderia_id, actor_id',
+      [['solicitud_id', sids], ['panaderia_id', panaderias], ['actor_id', usuarios]]);
+    const parejas = await leer('red_parejas', 'panaderia_menor_id, panaderia_mayor_id',
+      [['panaderia_menor_id', panaderias], ['panaderia_mayor_id', panaderias]]);
+    this.redPropia = validarRedPropia({ usuarios, panaderias, mids, solicitudes, detalles, movimientos, eventos, parejas });
+  }
+
+  #pasosRed() {
+    if (!this.redPropia) return [];
+    const pasos = [];
+    for (const t of ['movimientos_red', 'eventos_red', 'solicitudes_red_detalle', 'solicitudes_red']) {
+      const ids = this.redPropia[t];
+      if (ids.length) pasos.push({ descripcion: t, tabla: t, where: 'id IN (?)', params: [ids] });
+    }
+    for (const [menor, mayor] of this.redPropia.red_parejas) {
+      pasos.push({ descripcion: `red_parejas ${menor}/${mayor}`, tabla: 'red_parejas',
+        where: 'panaderia_menor_id IN (?) AND panaderia_mayor_id IN (?)', params: [[menor], [mayor]] });
+    }
+    return pasos;
+  }
+
   // Libera el bloqueo y cierra la conexión dedicada (al final de la suite, también si falló)
   async cerrar() {
     await this.#bloqueo.liberar();
   }
 }
+
+// Función pura, comprobada con dobles. Cualquier mezcla aborta ANTES del primer borrado.
+const validarRedPropia = ({ usuarios, panaderias, mids, solicitudes, detalles, movimientos, eventos, parejas }) => {
+  const en = (ids, id) => ids.includes(Number(id));
+  const sids = solicitudes.map(s => Number(s.id)), dids = detalles.map(d => Number(d.id));
+  const valido = solicitudes.every(s => en(panaderias, s.panaderia_solicitante_id) && en(panaderias, s.panaderia_proveedora_id) && en(usuarios, s.creada_por) && (s.cerrada_por === null || en(usuarios, s.cerrada_por)))
+    && detalles.every(d => en(sids, d.solicitud_id) && en(panaderias, d.panaderia_solicitante_id) && en(panaderias, d.panaderia_proveedora_id) && en(mids, d.materia_prima_destino_id) && (d.materia_prima_origen_id === null || en(mids, d.materia_prima_origen_id)))
+    && movimientos.every(m => en(dids, m.detalle_id) && en(panaderias, m.panaderia_id) && en(mids, m.materia_prima_id) && en(usuarios, m.usuario_id))
+    && eventos.every(e => en(sids, e.solicitud_id) && en(panaderias, e.panaderia_id) && en(usuarios, e.actor_id))
+    && parejas.every(p => en(panaderias, p.panaderia_menor_id) && en(panaderias, p.panaderia_mayor_id));
+  if (!valido) throw new ErrorAislamiento('Dependencia mixta de SQL006: no se borra ningún registro');
+  return { solicitudes_red: sids, solicitudes_red_detalle: dids, movimientos_red: movimientos.map(m => Number(m.id)),
+    eventos_red: eventos.map(e => Number(e.id)), red_parejas: parejas.map(p => [Number(p.panaderia_menor_id), Number(p.panaderia_mayor_id)]) };
+};
 
 // ---------- Evaluación del resultado de limpiar() ----------
 
@@ -933,6 +1003,7 @@ const iniciarEjecucion = async ({ suite, env = process.env, crearConexion, seque
 };
 
 module.exports = {
+  TABLAS_RED, PLANTILLA_PANADERIA_RED, validarRedPropia,
   BASE,
   NOMBRE_BLOQUEO,
   MAX_ID_SEMILLA,

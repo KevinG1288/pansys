@@ -16,7 +16,7 @@ const {
   NOMBRE_BLOQUEO, ErrorAislamiento, verificarConfiguracion, iniciarEjecucion, Ejecucion, abrirBloqueo,
   PLANTILLA_CUENTA, PLANTILLA_PANADERIA, PLANTILLA_PRODUCTO, limpiezaCorrecta, describirPendientes,
   SQL_BLOQUEO_PRODUCTOS, SQL_DETALLES_AJENOS, PLANTILLA_ASIGNAR_PANADERIA, SQL_PROPIETARIAS_ASIGNADAS,
-  SQL_DESASIGNAR_PROPIETARIAS
+  SQL_DESASIGNAR_PROPIETARIAS, TABLAS_RED, PLANTILLA_PANADERIA_RED, validarRedPropia
 } = require('./aislamiento');
 
 const resultados = [];
@@ -212,7 +212,7 @@ class ConexionDoble extends EventEmitter {
     }
     // Las dos plantillas de escritura protegida (texto exacto) y sus restricciones: email único y
     // claves foráneas hacia roles, panaderias y usuarios. Errores de MySQL con errno y sqlState.
-    if (consulta === PLANTILLA_CUENTA || consulta === PLANTILLA_PANADERIA || consulta === PLANTILLA_PRODUCTO) {
+    if (consulta === PLANTILLA_CUENTA || consulta === PLANTILLA_PANADERIA || consulta === PLANTILLA_PANADERIA_RED || consulta === PLANTILLA_PRODUCTO) {
       const errorSql = (errno, code) => Object.assign(new Error(code), { errno, code, sqlState: '23000', fatal: false });
       let fila;
       if (consulta === PLANTILLA_CUENTA) {
@@ -230,7 +230,7 @@ class ConexionDoble extends EventEmitter {
       } else {
         const [nombre, usuarioId] = params;
         if (!s.db.usuarios.some(u => u.id === usuarioId)) throw errorSql(1452, 'ER_NO_REFERENCED_ROW_2');
-        fila = { id: s.siguienteFila++, nombre, usuario_id: usuarioId, direccion: 'Dirección temporal de pruebas' };
+        fila = { id: s.siguienteFila++, nombre, usuario_id: usuarioId, en_red: consulta === PLANTILLA_PANADERIA_RED ? 1 : 0, direccion: 'Dirección temporal de pruebas' };
         s.db.panaderias.push(fila);
       }
       // Gancho para simular un resultado incierto DESPUÉS de aplicar el INSERT
@@ -356,6 +356,48 @@ const esConsultaDetallesAjenos = (sql) => sql === SQL_DETALLES_AJENOS;
 const ESCRITURAS = /^(DELETE|INSERT|UPDATE|START TRANSACTION|TRUNCATE|DROP|ALTER)/;
 
 const main = async () => {
+  console.log('\n== SQL006: aislamiento');
+  {
+    const { servidor, ej } = await preparar({ propios: false });
+    const admin = await ej.crearCuenta({ etiqueta: 'redadmin', rol: 'administrador', activa: false });
+    const pan = await ej.crearPanaderia({ etiqueta: 'RED', propietariaId: admin, enRed: true });
+    igual('panaderia temporal en red y registrada', [servidor.db.panaderias.find(p => p.id === pan).en_red, ej.ids('panaderias').includes(pan)], [1, true]);
+    igual('enRed exige booleano', (await falla(() => ej.crearPanaderia({ etiqueta: 'MAL', propietariaId: admin, enRed: 1 }))) instanceof ErrorAislamiento, true);
+    await ej.cerrar();
+  }
+  const datosRed = () => ({ usuarios: [10,11,12], panaderias: [20,21], mids: [30],
+    solicitudes: [{ id: 100, panaderia_solicitante_id: 20, panaderia_proveedora_id: 21, creada_por: 11, cerrada_por: 12 }],
+    detalles: [{ id: 110, solicitud_id: 100, panaderia_solicitante_id: 20, panaderia_proveedora_id: 21, materia_prima_destino_id: 30, materia_prima_origen_id: null }],
+    movimientos: [{ id: 120, detalle_id: 110, panaderia_id: 20, materia_prima_id: 30, usuario_id: 12 }],
+    eventos: [{ id: 130, solicitud_id: 100, panaderia_id: 20, actor_id: 11 }],
+    parejas: [{ panaderia_menor_id: 20, panaderia_mayor_id: 21 }] });
+  igual('SQL006 registra IDs y PK compuesta', validarRedPropia(datosRed()), {
+    solicitudes_red: [100], solicitudes_red_detalle: [110], movimientos_red: [120], eventos_red: [130], red_parejas: [[20,21]] });
+  for (const [tabla, campo] of [['solicitudes','panaderia_proveedora_id'], ['solicitudes','creada_por'], ['solicitudes','cerrada_por'],
+    ['detalles','solicitud_id'], ['detalles','materia_prima_destino_id'], ['detalles','materia_prima_origen_id'],
+    ['movimientos','detalle_id'], ['movimientos','usuario_id'], ['eventos','solicitud_id'], ['eventos','actor_id'], ['parejas','panaderia_mayor_id']]) {
+    const datos = datosRed(); datos[tabla][0][campo] = 999;
+    igual(`SQL006 rechaza mezcla ${tabla}.${campo}`, (await falla(() => validarRedPropia(datos))) instanceof ErrorAislamiento, true);
+  }
+  for (const mixta of [false, true]) {
+    const { servidor, ej, conexion, ajenos } = await preparar();
+    const datos = datosRed();
+    const filas = { solicitudes_red: datos.solicitudes, solicitudes_red_detalle: datos.detalles, movimientos_red: datos.movimientos, eventos_red: datos.eventos, red_parejas: datos.parejas };
+    for (const t of TABLAS_RED) servidor.db[t] = copiar(filas[t]);
+    if (mixta) servidor.db.eventos_red[0].actor_id = 1;
+    const antes = copiar(servidor.db);
+    const r = await ej.limpiar();
+    if (mixta) {
+      igual('mezcla SQL006: rollback sin DELETE', [r.resultado, sentencias(conexion, 'DELETE').length, servidor.db], ['revertida', 0, antes]);
+    } else {
+      igual('limpieza SQL006 completa', [limpiezaCorrecta(r), TABLAS_RED.every(t => servidor.db[t].length === 0)], [true, true]);
+      const borrados = sentencias(conexion, 'DELETE').map(sql => sql.split(' ')[2]);
+      igual('hijos de red antes de padres', borrados.slice(0,5), ['pansys_test.movimientos_red','pansys_test.eventos_red','pansys_test.solicitudes_red_detalle','pansys_test.solicitudes_red','pansys_test.red_parejas']);
+      for (const t of Object.keys(ajenos)) igual(`SQL006 conserva ${t}`, servidor.db[t], ajenos[t]);
+    }
+    await ej.cerrar();
+  }
+
   // ---------- Configuración y apertura ----------
   console.log('\n== Configuración y bloqueo de suite');
   igual('verificarConfiguracion acepta pansys_test', await falla(() => verificarConfiguracion(ENV)), null);
@@ -2007,7 +2049,7 @@ const main = async () => {
   igual('plantilla de panadería exacta', PLANTILLA_PANADERIA,
     "INSERT INTO pansys_test.panaderias (nombre, direccion, telefono, en_red, usuario_id, createdAt, updatedAt) VALUES (?, 'Dirección temporal de pruebas', NULL, 0, ?, NOW(), NOW())");
   igual('el código solo contiene tres INSERT: pansys_test.usuarios, pansys_test.panaderias y pansys_test.productos',
-    (sinComentarios.match(/INSERT INTO\s+\S+/g) ?? []), ['INSERT INTO pansys_test.usuarios', 'INSERT INTO pansys_test.panaderias', 'INSERT INTO pansys_test.productos']);
+    (sinComentarios.match(/INSERT INTO\s+\S+/g) ?? []), ['INSERT INTO pansys_test.usuarios', 'INSERT INTO pansys_test.panaderias', 'INSERT INTO pansys_test.panaderias', 'INSERT INTO pansys_test.productos']);
   igual('plantilla de producto exacta', PLANTILLA_PRODUCTO,
     'INSERT INTO pansys_test.productos (nombre, precio_compra, precio_venta, cantidad_disponible, panaderia_id, estado, createdAt, updatedAt) VALUES (?, 0, ?, ?, ?, ?, NOW(), NOW())');
   igual('plantilla de asignación exacta (una fila: id, correo marcado, administradora sin panadería)', PLANTILLA_ASIGNAR_PANADERIA,

@@ -11,7 +11,8 @@
 // Qué captura, por tabla: número de filas, id mínimo y máximo, dos agregados de CRC32 por fila
 // (BIT_XOR y SUM, calculados en MySQL sobre todas las columnas), CHECKSUM TABLE y el esquema
 // (columnas, tipos y nulabilidad). Además, las columnas no sensibles de las cuentas 1-4 y de las
-// panaderías 1-2, y si existen las tablas del SQL 005.
+// panaderías 1-2, las cinco tablas del SQL006 y, si existen, las tablas del SQL 005.
+// red_parejas usa los dos componentes de su PK en los extremos (no tiene columna id).
 //
 // Qué NO captura: hashes de contraseñas (de las cuentas 1-4 solo se guarda si la contraseña es la
 // de la semilla '!', calculado en MySQL), secretos ni valores del .env. La columna contrasena solo
@@ -37,7 +38,8 @@ const path = require('path');
 const BASE = 'pansys_test';
 const TABLAS = [
   'roles', 'usuarios', 'panaderias', 'materia_prima', 'productos', 'ventas',
-  'detalle_ventas', 'receta_producto', 'orden_produccion', 'insumo_usado'
+  'detalle_ventas', 'receta_producto', 'orden_produccion', 'insumo_usado',
+  'red_parejas', 'solicitudes_red', 'solicitudes_red_detalle', 'movimientos_red', 'eventos_red'
 ];
 const TABLAS_OPCIONALES = ['eventos_seguridad', 'restablecimientos_contrasena'];
 const RAIZ_REPOSITORIO = path.resolve(__dirname, '..', '..');
@@ -108,8 +110,10 @@ const capturar = async (conexion) => {
       // CRC32 de cada fila sobre todas sus columnas (NULL distinto de texto vacío); solo se
       // devuelven agregados de la tabla
       const fila = `CONCAT_WS(CHAR(31), ${cols.map(c => `IFNULL(CAST(\`${c.columna}\` AS CHAR), '<NULL>')`).join(', ')})`;
+      // red_parejas tiene PK compuesta y NO tiene columna id.
+      const identidad = t === 'red_parejas' ? "CONCAT(LPAD(panaderia_menor_id, 10, '0'), '/', LPAD(panaderia_mayor_id, 10, '0'))" : 'id';
       const [agregado] = await consultar(
-        `SELECT COUNT(*) AS filas, MIN(id) AS id_min, MAX(id) AS id_max,
+        `SELECT COUNT(*) AS filas, MIN(${identidad}) AS id_min, MAX(${identidad}) AS id_max,
                 BIT_XOR(CRC32(${fila})) AS xor_crc, SUM(CRC32(${fila})) AS suma_crc
          FROM ${BASE}.\`${t}\``
       );
@@ -183,6 +187,9 @@ const compararFotos = (antes, despues) => {
     }
   }
   if (diferencias.length) return { sinDiferencias: false, diferencias };
+  for (const t of TABLAS) {
+    if (!antes.tablas?.[t] || !despues.tablas?.[t]) diferencias.push(`${t}: falta cobertura obligatoria en las fotos`);
+  }
 
   if (distinto(antes.opcionales, despues.opcionales)) diferencias.push('Cambió la presencia de las tablas del SQL 005');
   const tablas = [...new Set([...Object.keys(antes.tablas), ...Object.keys(despues.tablas)])].sort();
