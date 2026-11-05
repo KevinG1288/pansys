@@ -6,7 +6,9 @@
 -- explícitamente pansys_test; no se lee ni se toca pansys_db.
 --
 -- TIPO: migración de la base de PRUEBAS. La versión para pansys_db queda fuera de alcance.
--- ESTADO: NO APLICADO. Su ejecución requiere una autorización expresa.
+-- ESTADO: APLICADO en pansys_test el 2026-10-28 (archivo completo en una sola invocación del
+--   cliente mysql; compuertas 2.1 y 3.5 = STRING). No lo repita: la compuerta 2.1 aborta si las
+--   tablas existen. Volver a aplicarlo (p. ej. tras recrear pansys_test) requiere autorización.
 -- Requisitos: MySQL 8.0.16 o superior de la serie 8.0 (CHECK aplicados); hoy 8.0.44.
 --
 -- Claves foráneas RESTRICT/RESTRICT: MySQL prohíbe usar en CHECK o en columnas generadas STORED
@@ -19,14 +21,18 @@
 --   3. Fotografía previa: node pruebas/foto_pansys_test.js --guardar <archivo fuera del repo>.
 --
 -- CÓMO EJECUTAR
---   * UNA sola sesión de principio a fin: las referencias del bloque 1 se guardan en variables
---     de sesión (@ref_*) y las compuertas las exigen. En otra sesión valen NULL y se aborta.
---   * Con un cliente que se DETENGA en el primer error:
---       - MySQL Workbench con «Continue on SQL Script Error» DESACTIVADO, ejecutando cada
---         bloque como UNA selección completa; o
---       - el cliente mysql en modo por lotes (mysql ... < archivo_del_bloque) SIN --force.
+--   * UNA sola conexión de principio a fin: los SET iniciales y las referencias del bloque 1
+--     (@ref_*, @tiene_process) son de SESIÓN y las compuertas las exigen. En otra conexión
+--     valen NULL y se aborta. Nunca ejecute los bloques en invocaciones distintas del cliente.
+--   * Con un cliente que se DETENGA en el primer error, en UNA conexión:
+--       - el cliente mysql en modo por lotes con el archivo COMPLETO en una sola invocación
+--         (mysql ... --skip-reconnect --table --show-warnings < este_archivo), SIN --force,
+--         desde cmd.exe; ver el procedimiento detallado en ../005_restablecimiento_contrasena.sql; o
+--       - MySQL Workbench en UNA pestaña, con «Continue on SQL Script Error» DESACTIVADO,
+--         ejecutando cada bloque como UNA selección completa, en orden y sin reconectar.
 --     NO use --force ni `source` / `\.` desde el cliente interactivo (continúa tras un error).
---   * Orden controlado, revisando la salida entre bloques:
+--   * Orden controlado (en Workbench, revisando la salida entre bloques en la misma pestaña;
+--     con el cliente mysql, el orden del archivo y la revisión de la salida al terminar):
 --       bloque 1 completo (desde USE) → GUARDE su salida y revísela →
 --       bloque 2 completo, de 2.0 a 2.3 en una sola selección (NUNCA un CREATE TABLE suelto) →
 --       bloque 3 completo → fotografía posterior.
