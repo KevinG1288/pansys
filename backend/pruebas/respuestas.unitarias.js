@@ -42,14 +42,14 @@ const main = async () => {
     ForeignKeyConstraintError, UniqueConstraintError, ConnectionRefusedError, AccessDeniedError, DatabaseError,
     ValidationError, ValidationErrorItem
   } = require('sequelize');
-  const { Panaderia, MateriaPrima, Producto, Venta } = require('../src/models/index');
+  const { sequelize, Panaderia, MateriaPrima, Producto, Venta } = require('../src/models/index');
   const { resolverPanaderia } = require('../src/middlewares/roles.middleware');
   const ventasController = require('../src/modules/ventas/ventas.controller');
   const inventarioController = require('../src/modules/inventario/inventario.controller');
   const inventarioService = require('../src/modules/inventario/inventario.service');
   const { ErrorNegocio, responderError } = require('../src/utils/errores');
 
-  const originales = {
+  const originales = { transaction: sequelize.transaction, query: sequelize.query, materiaUpdate: MateriaPrima.update,
     panaderiaFindByPk: Panaderia.findByPk, materiaFindAll: MateriaPrima.findAll, materiaFindOne: MateriaPrima.findOne,
     materiaCreate: MateriaPrima.create, productoFindAll: Producto.findAll, productoCreate: Producto.create,
     ventaFindAll: Venta.findAll, consolaError: console.error
@@ -58,16 +58,18 @@ const main = async () => {
   // Escenario: panadería 20 con dos materias primas (30 con stock bajo, 32 no), un producto y una venta.
   // fallo = { en, error } lanza ese error en ese paso.
   const MATERIAS = [
-    { id: 30, nombre: 'Harina', unidad_medida: 'kg', cantidad_disponible: 2, stock_minimo: 5, precio_unitario: 1.5, panaderia_id: 20, estado: true },
-    { id: 32, nombre: 'Azúcar', unidad_medida: 'kg', cantidad_disponible: 10, stock_minimo: 5, precio_unitario: 2, panaderia_id: 20, estado: true }
+    { id: 30, nombre: 'Harina', unidad_medida: 'kg', cantidad_disponible: 2, stock_minimo: 5, precio_unitario: 1.5, panaderia_id: 20, estado: true, version_fila: 0 },
+    { id: 32, nombre: 'Azúcar', unidad_medida: 'kg', cantidad_disponible: 10, stock_minimo: 5, precio_unitario: 2, panaderia_id: 20, estado: true, version_fila: 0 }
   ];
   const PRODUCTOS = [{ id: 40, nombre: 'Pan', precio_compra: 200, precio_venta: 500, cantidad_disponible: 12, panaderia_id: 20, estado: true }];
   const VENTAS = [{ id: 50, total: 1000, panaderia_id: 20, DetalleVenta: [{ producto_id: 40, cantidad: 2 }] }];
+  let actualizada;
   let eventos;
   let fallo;
   let creado;
   let erroresRegistrados;
   const preparar = (nuevoFallo = null) => {
+    actualizada = null;
     eventos = [];
     fallo = nuevoFallo;
     creado = null;
@@ -81,6 +83,15 @@ const main = async () => {
     eventos.push(`listarMaterias:${where.panaderia_id}`);
     fallarSi('listarMaterias');
     return copia(MATERIAS.filter(m => m.panaderia_id === where.panaderia_id && m.estado === where.estado));
+  };
+  sequelize.transaction = async (opciones, callback) => (callback || opciones)({ LOCK: { UPDATE: 'UPDATE' } });
+  sequelize.query = async () => [];
+  MateriaPrima.update = async (campos, { where }) => {
+    eventos.push('guardar'); fallarSi('guardar');
+    const base = MATERIAS.find(m => m.id === Number(where.id));
+    actualizada = { ...base, ...campos, version_fila: base.version_fila + 1 };
+    await MateriaPrima.build(actualizada).validate();
+    return [1];
   };
   // Instancia falsa con update(): las validaciones del modelo son las reales
   const instanciaMateria = (datos) => ({
@@ -97,7 +108,7 @@ const main = async () => {
     eventos.push('buscarMateria');
     fallarSi('buscarMateria');
     const m = MATERIAS.find(x => x.id === Number(where.id) && (where.panaderia_id === undefined || x.panaderia_id === where.panaderia_id));
-    return m ? instanciaMateria(copia(m)) : null;
+    return m ? instanciaMateria(copia(actualizada || m)) : null;
   };
   MateriaPrima.create = async (valores) => {
     eventos.push('crearMateria');
@@ -134,6 +145,7 @@ const main = async () => {
   });
   const llamar = async (metodo, req) => {
     const res = respuestaDoble();
+    if (metodo === inventarioController.actualizar || metodo === inventarioController.eliminar) req = { ...req, body: { version_fila: 0, ...req.body } };
     await metodo({ panaderiaId: 20, params: {}, query: {}, usuario: { id: 11, rol_id: 2, panaderia_id: 20 }, ...req }, res);
     return res;
   };
@@ -184,7 +196,7 @@ const main = async () => {
     ['GET /api/inventario', 'listarMaterias', () => llamar(inventarioController.getAll, {})],
     ['GET /api/inventario/:id', 'buscarMateria', () => llamar(inventarioController.getById, { params: { id: '30' } })],
     ['POST /api/inventario', 'crearMateria', () => llamar(inventarioController.crear, { body: { nombre: 'Sal', unidad_medida: 'kg' } })],
-    ['PUT /api/inventario/:id', 'guardar', () => llamar(inventarioController.actualizar, { params: { id: '30' }, body: { precio_unitario: '2.5' } })],
+    ['PUT /api/inventario/:id', 'guardar', () => llamar(inventarioController.actualizar, { params: { id: '30' }, body: { precio_unitario: '2.5', version_fila: 0 } })],
     ['DELETE /api/inventario/:id', 'guardar', () => llamar(inventarioController.eliminar, { params: { id: '30' } })],
     ['GET /api/inventario/stock-bajo', 'listarMaterias', () => llamar(inventarioController.stockBajo, {})]
   ];
@@ -227,12 +239,12 @@ const main = async () => {
     r = await llamar(inventarioController.crear, {
       body: { nombre: 'Levadura', unidad_medida: 'g', cantidad_disponible: '1.2345', stock_minimo: 0, precio_unitario: 10, panaderia_id: 99, estado: false }
     });
-    const levadura = { nombre: 'Levadura', unidad_medida: 'g', cantidad_disponible: 1.2345, stock_minimo: 0, precio_unitario: 10, panaderia_id: 20 };
+    const levadura = { nombre: 'Levadura', unidad_medida: 'g', cantidad_disponible: 1.2345, stock_minimo: 0, precio_unitario: 10, panaderia_id: 20, version_fila: 0 };
     igual('POST /api/inventario -> 201 con la materia prima creada', [r.codigo, r.cuerpo], [201, { id: 31, ...levadura }]);
     igual('crear materia prima: decimales convertidos; panadería y estado los fija el servidor', creado, levadura);
     preparar();
-    r = await llamar(inventarioController.actualizar, { params: { id: '30' }, body: { precio_unitario: '2.5' } });
-    igual('PUT /api/inventario/:id -> 200 con la materia prima editada', [r.codigo, r.cuerpo], [200, { ...MATERIAS[0], precio_unitario: 2.5 }]);
+    r = await llamar(inventarioController.actualizar, { params: { id: '30' }, body: { precio_unitario: '2.5', version_fila: 0 } });
+    igual('PUT /api/inventario/:id -> 200 con la materia prima editada', [r.codigo, r.cuerpo], [200, { ...MATERIAS[0], precio_unitario: 2.5, version_fila: 1 }]);
     preparar();
     r = await llamar(inventarioController.eliminar, { params: { id: '30' } });
     igual('DELETE /api/inventario/:id -> 200 con el mensaje de siempre', [r.codigo, r.cuerpo], [200, { mensaje: 'Materia prima eliminada correctamente' }]);
@@ -350,8 +362,8 @@ const main = async () => {
     }
     for (const [descripcion, invocar, codigo] of [
       ['getById', () => inventarioService.getById('99', 20), 404],
-      ['actualizar', () => inventarioService.actualizar('99', {}, 20), 400],
-      ['eliminar', () => inventarioService.eliminar('99', 20), 400]
+      ['actualizar', () => inventarioService.actualizar('99', { version_fila: 0 }, 20), 400],
+      ['eliminar', () => inventarioService.eliminar('99', 20, 0), 400]
     ]) {
       preparar();
       const s = await resultado(invocar());
@@ -454,6 +466,9 @@ const main = async () => {
     igual('inventario.service.js no lanza Error genéricos (solo ErrorNegocio)', /new Error\(/.test(leer('../src/modules/inventario/inventario.service.js')), false);
   } finally {
     Panaderia.findByPk = originales.panaderiaFindByPk;
+    sequelize.transaction = originales.transaction;
+    sequelize.query = originales.query;
+    MateriaPrima.update = originales.materiaUpdate;
     MateriaPrima.findAll = originales.materiaFindAll;
     MateriaPrima.findOne = originales.materiaFindOne;
     MateriaPrima.create = originales.materiaCreate;

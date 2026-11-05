@@ -44,7 +44,7 @@ class InventarioController {
 
   async eliminar(req, res) {
     try {
-      const resultado = await inventarioService.eliminar(req.params.id, req.panaderiaId);
+      const resultado = await inventarioService.eliminar(req.params.id, req.panaderiaId, req.body?.version_fila);
       res.json(resultado);
     } catch (error) {
       // 400 materia prima no encontrada; cualquier error interno es un 500 sin detalles

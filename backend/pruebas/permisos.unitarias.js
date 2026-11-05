@@ -69,13 +69,13 @@ const main = async () => {
   MateriaPrima.findOne = async (opciones) => { consultas.push(['materia_prima', opciones?.where]); return null; };
   Producto.findOne = async (opciones) => { consultas.push(['productos', opciones?.where]); return null; };
   OrdenProduccion.findOne = async (opciones) => { consultas.push(['orden_produccion', opciones?.where]); return null; };
-  sequelize.transaction = async (fn) => fn({ LOCK: { UPDATE: 'UPDATE' } });
+  sequelize.transaction = async (opciones, callback) => (callback || opciones)({ LOCK: { UPDATE: 'UPDATE' } });
 
   // [descripción, llamada(panaderiaId), código y mensaje esperados con una panadería válida]
   const busquedas = [
     ['inventario.getById', (p) => inventarioService.getById('30', p), 404, 'Materia prima no encontrada'],
-    ['inventario.actualizar', (p) => inventarioService.actualizar('30', { precio_unitario: '1' }, p), 400, 'Materia prima no encontrada'],
-    ['inventario.eliminar', (p) => inventarioService.eliminar('30', p), 400, 'Materia prima no encontrada'],
+    ['inventario.actualizar', (p) => inventarioService.actualizar('30', { precio_unitario: '1', version_fila: 0 }, p), 400, 'Materia prima no encontrada'],
+    ['inventario.eliminar', (p) => inventarioService.eliminar('30', p, 0), 400, 'Materia prima no encontrada'],
     ['ordenes.obtener', (p) => ordenesService.obtener('5', p), 404, 'Orden de producción no encontrada'],
     ['ordenes.finalizar', (p) => ordenesService.finalizar('5', { cantidad_producida: 1 }, p, 11), 404, 'Orden de producción no encontrada'],
     ['ordenes.cancelar', (p) => ordenesService.cancelar('5', { motivo: 'Prueba', devolver_insumos: false }, p, 11), 404, 'Orden de producción no encontrada'],

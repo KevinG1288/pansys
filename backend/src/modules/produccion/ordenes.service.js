@@ -4,6 +4,7 @@ const {
 } = require('../../models/index');
 const { ErrorNegocio } = require('../../utils/errores');
 const { enTransaccion } = require('../../utils/transaccion');
+const { exigirVersionDisponible, conflictoVersion } = require('../../utils/version-fila');
 const recetasService = require('./recetas.service');
 const {
   ESTADOS_ORDEN, MAX_CANTIDAD_ORDEN, MAX_UNIDADES, aUnidades, deUnidades, aDecimal4, centavosATexto,
@@ -103,23 +104,25 @@ class OrdenesService {
         });
       }
 
+      necesidades.forEach(n => exigirVersionDisponible(n.version_fila));
       // Descuento atómico en MySQL con valores exactos de 4 decimales: la condición vuelve a
       // comprobar el stock sobre la fila bloqueada, sin tolerancias
       for (const n of necesidades) {
         const [afectadas] = await MateriaPrima.update(
-          { cantidad_disponible: sequelize.literal(`GREATEST(cantidad_disponible - ${aDecimal4(n.necesario)}, 0)`) },
+          { cantidad_disponible: sequelize.literal(`cantidad_disponible - ${aDecimal4(n.necesario)}`), version_fila: sequelize.literal('version_fila + 1') },
           {
             where: {
               id: n.materia_prima_id,
               panaderia_id: producto.panaderia_id,
               estado: true,
+              version_fila: n.version_fila,
               cantidad_disponible: { [Op.gte]: aDecimal4(n.necesario) }
             },
             transaction: t
           }
         );
         if (afectadas !== 1) {
-          throw new Error(`No se pudo descontar la materia prima ${n.materia_prima_id}`);
+          throw conflictoVersion();
         }
       }
 
@@ -293,6 +296,24 @@ class OrdenesService {
         }
       }
 
+      // Todas las materias con devolución positiva se bloquean antes de escribir, por id.
+      // Las materias inactivas también admiten devolución, sin reactivarse.
+      const ids = [...devoluciones].filter(([, u]) => u > 0).map(([mid]) => mid).sort((a, b) => a - b);
+      const materias = ids.length ? await MateriaPrima.findAll({
+        where: { id: ids, panaderia_id: orden.panaderia_id },
+        attributes: ['id', 'cantidad_disponible', 'version_fila'],
+        order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE
+      }) : [];
+      const bloqueadas = new Map(materias.map(m => [m.id, m]));
+      for (const mid of ids) {
+        const m = bloqueadas.get(mid);
+        if (!m) throw new Error(`Materia prima ${mid} de la orden ${orden.id} no encontrada en su panadería`);
+        exigirVersionDisponible(m.version_fila);
+        if (aUnidades(m.cantidad_disponible) + devoluciones.get(mid) > MAX_UNIDADES) {
+          throw new ErrorNegocio(`Devolver los insumos superaría el máximo de inventario (99.999.999,9999) para la materia prima ${mid}`, 409, { materia_prima_id: mid });
+        }
+      }
+
       // ---- Fase B: aplicar (materias primas en orden de id) ----
       let algunaDevuelta = false;
       for (const insumo of insumos) {
@@ -306,20 +327,14 @@ class OrdenesService {
           // la suma con un error de rango (y que la cancelación termine en un 500)
           const donde = { id: insumo.materia_prima_id, panaderia_id: orden.panaderia_id };
           const [afectadas] = await MateriaPrima.update(
-            { cantidad_disponible: sequelize.literal(`cantidad_disponible + ${aDecimal4(devuelta)}`) },
+            { cantidad_disponible: sequelize.literal(`cantidad_disponible + ${aDecimal4(devuelta)}`), version_fila: sequelize.literal('version_fila + 1') },
             {
-              where: { ...donde, cantidad_disponible: { [Op.lte]: aDecimal4(MAX_UNIDADES - devuelta) } },
+              where: { ...donde, version_fila: bloqueadas.get(insumo.materia_prima_id).version_fila, cantidad_disponible: { [Op.lte]: aDecimal4(MAX_UNIDADES - devuelta) } },
               transaction: t
             }
           );
           if (afectadas !== 1) {
-            if (await MateriaPrima.count({ where: donde, transaction: t }) === 1) {
-              throw new ErrorNegocio(
-                `Devolver los insumos superaría el máximo de inventario (99.999.999,9999) para la materia prima ${insumo.materia_prima_id}`,
-                409, { materia_prima_id: insumo.materia_prima_id }
-              );
-            }
-            throw new Error(`Materia prima ${insumo.materia_prima_id} de la orden ${orden.id} no encontrada en su panadería`);
+            throw conflictoVersion();
           }
         }
 

@@ -52,7 +52,7 @@ const main = async () => {
   const preparar = (precios) => {
     eventos = [];
     materias = Object.entries(precios).map(([id, precio]) => {
-      const valores = { disponible: 100, minimo: 0, precio };
+      const valores = { version_fila: 0, disponible: 100, minimo: 0, precio };
       return {
         id: Number(id), nombre: `Insumo ${id}`, unidad_medida: 'kg', panaderia_id: 20, estado: true,
         get: (campo) => valores[campo]

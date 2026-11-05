@@ -17,7 +17,7 @@ const CIENMILLONESIMAS_POR_CENTAVO = 1000000n;
 // materia_prima guarda cantidades y precio en DECIMAL(12,4): se leen tal cual (exactos, con sus
 // 4 decimales) y se operan en diezmilésimas enteras, sin redondear el precio antes de calcular.
 const ATRIBUTOS_MATERIA_EXACTOS = [
-  'id', 'nombre', 'unidad_medida', 'panaderia_id', 'estado',
+  'id', 'nombre', 'unidad_medida', 'panaderia_id', 'estado', 'version_fila',
   ['cantidad_disponible', 'disponible'],
   ['stock_minimo', 'minimo'],
   ['precio_unitario', 'precio']
@@ -244,6 +244,7 @@ class RecetasService {
       const disponible = aUnidades(m.get('disponible'));
       return {
         materia_prima_id: m.id,
+        version_fila: m.get('version_fila'),
         nombre: m.nombre,
         unidad_medida: m.unidad_medida,
         porUnidad,

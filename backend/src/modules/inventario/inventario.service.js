@@ -1,4 +1,8 @@
-const { MateriaPrima } = require('../../models/index');
+const { sequelize, MateriaPrima } = require('../../models/index');
+const { Transaction } = require('sequelize');
+const { enTransaccion } = require('../../utils/transaccion');
+const { parsearVersion, exigirVersionDisponible, conflictoVersion } = require('../../utils/version-fila');
+const { exigirSinPendientes } = require('./inventario.proteccion');
 const { ErrorNegocio } = require('../../utils/errores');
 const { parsearCantidad, deUnidades, exigirPanaderiaId } = require('../produccion/produccion.validaciones');
 
@@ -37,19 +41,40 @@ class InventarioService {
   }
 
   async crear(datos, panaderiaId) {
-    return await MateriaPrima.create({ ...filtrarCampos(datos), panaderia_id: panaderiaId });
+    return await MateriaPrima.create({ ...filtrarCampos(datos), panaderia_id: exigirPanaderiaId(panaderiaId), version_fila: 0 });
   }
 
   async actualizar(id, datos, panaderiaId) {
     const campos = filtrarCampos(datos);
-    const item = await this.getById(id, panaderiaId, 400);
-    return await item.update(campos);
+    return this.modificar(id, panaderiaId, datos?.version_fila, campos);
   }
 
-  async eliminar(id, panaderiaId) {
-    const item = await this.getById(id, panaderiaId, 400);
-    await item.update({ estado: false });
+  async eliminar(id, panaderiaId, version) {
+    await this.modificar(id, panaderiaId, version, { estado: false });
     return { mensaje: 'Materia prima eliminada correctamente' };
+  }
+
+  async modificar(id, panaderiaId, version, campos) {
+    const esperada = parsearVersion(version);
+    const where = condicionPorId(id, panaderiaId);
+    // Si se envían campos estructurales usamos RC para poder clasificarlos bajo bloqueo.
+    // Solo los cambios efectivos consultan pendientes. Stock/precio/mínimo conservan el aislamiento habitual.
+    const estructuralPosible = 'nombre' in campos || 'unidad_medida' in campos || campos.estado === false;
+    const opciones = estructuralPosible ? { isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED } : undefined;
+    return enTransaccion(sequelize, async (t) => {
+      const item = await MateriaPrima.findOne({ where, transaction: t, lock: t.LOCK.UPDATE });
+      if (!item) throw new ErrorNegocio('Materia prima no encontrada', 400);
+      if (item.version_fila !== esperada) throw conflictoVersion();
+      if (!item.estado) throw new ErrorNegocio('Materia prima inactiva', 409, { codigo: 'MATERIA_INACTIVA' });
+      exigirVersionDisponible(item.version_fila);
+      const estructural = campos.estado === false || ['nombre', 'unidad_medida'].some(c => c in campos && campos[c] !== item[c]);
+      if (estructural) await exigirSinPendientes(item.id, where.panaderia_id, t);
+      const [afectadas] = await MateriaPrima.update({ ...campos, version_fila: sequelize.literal('version_fila + 1') }, {
+        where: { ...where, estado: true, version_fila: esperada }, transaction: t
+      });
+      if (afectadas !== 1) throw conflictoVersion();
+      return MateriaPrima.findOne({ where, transaction: t });
+    }, 3, opciones);
   }
 
   async verificarStockBajo(panaderiaId) {
