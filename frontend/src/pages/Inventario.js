@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Boxes, PackageX, Plus, RotateCw, TriangleAlert, Wallet } from 'lucide-react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
@@ -28,6 +28,8 @@ const Inventario = () => {
   const [porEliminar, setPorEliminar] = useState(null);
   const [eliminando, setEliminando] = useState(false);
   const [errorEliminar, setErrorEliminar] = useState(null);
+  const [conflictoEliminar, setConflictoEliminar] = useState(false);
+  const eliminandoRef = useRef(false);
 
   const cargarInventario = useCallback(async () => {
     setErrorCarga(null);
@@ -64,8 +66,8 @@ const Inventario = () => {
 
   // Recibe los datos ya validados y convertidos por FormularioInsumo; los errores los muestra el formulario
   const guardarInsumo = async (datos) => {
-    const cuerpo = datos;
     const editando = Boolean(formulario.insumo);
+    const cuerpo = editando ? { ...datos, version_fila: formulario.insumo.version_fila } : datos;
     if (editando) {
       await api.put(`/api/inventario/${formulario.insumo.id}`, cuerpo);
     } else {
@@ -79,20 +81,33 @@ const Inventario = () => {
   const pedirEliminacion = (insumo) => {
     setAviso(null);
     setErrorEliminar(null);
+    setConflictoEliminar(false);
     setPorEliminar(insumo);
   };
 
   const confirmarEliminacion = async () => {
+    if (eliminandoRef.current) return;
+    eliminandoRef.current = true;
     setEliminando(true);
     setErrorEliminar(null);
     try {
-      await api.delete(`/api/inventario/${porEliminar.id}`);
+      if (conflictoEliminar) {
+        const res = await api.get(`/api/inventario/${porEliminar.id}`);
+        if (!res.data.estado) { setPorEliminar(null); setAviso({ tipo: 'info', texto: 'El insumo ya no está activo.' }); }
+        else { setPorEliminar(res.data); setConflictoEliminar(false); }
+        await cargarInventario();
+        return;
+      }
+      await api.delete(`/api/inventario/${porEliminar.id}`, { data: { version_fila: porEliminar.version_fila } });
       setAviso({ tipo: 'exito', texto: `«${porEliminar.nombre}» se eliminó del inventario.` });
       setPorEliminar(null);
       await cargarInventario();
     } catch (error) {
-      setErrorEliminar(mensajeError(error, 'No se pudo eliminar el insumo.'));
+      const conflicto = error.response?.status === 409 && error.response?.data?.codigo === 'VERSION_DESACTUALIZADA';
+      if (conflicto) setConflictoEliminar(true);
+      setErrorEliminar(conflicto ? 'El insumo cambió. Actualiza los datos y vuelve a confirmar la eliminación manualmente.' : mensajeError(error, 'No se pudo eliminar el insumo.'));
     } finally {
+      eliminandoRef.current = false;
       setEliminando(false);
     }
   };
@@ -134,10 +149,16 @@ const Inventario = () => {
 
         {formulario && (
           <FormularioInsumo
-            key={formulario.insumo?.id ?? 'nuevo'}
+            key={formulario.insumo ? `${formulario.insumo.id}-${formulario.insumo.version_fila}` : 'nuevo'}
             insumo={formulario.insumo}
             onGuardar={guardarInsumo}
             onCancelar={() => setFormulario(null)}
+            onRecargar={async () => {
+              const res = await api.get(`/api/inventario/${formulario.insumo.id}`);
+              if (!res.data.estado) throw new Error('El insumo ya no está activo. Cierra el formulario y actualiza el inventario.');
+              setFormulario({ insumo: res.data });
+              await cargarInventario();
+            }}
           />
         )}
 
@@ -181,7 +202,7 @@ const Inventario = () => {
         <DialogoConfirmacion
           titulo={`¿Eliminar «${porEliminar.nombre}»?`}
           descripcion="El insumo dejará de aparecer en el inventario."
-          textoConfirmar="Eliminar"
+          textoConfirmar={conflictoEliminar ? 'Actualizar datos' : 'Eliminar'}
           confirmando={eliminando}
           error={errorEliminar}
           onConfirmar={confirmarEliminacion}

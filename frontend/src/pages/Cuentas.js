@@ -275,7 +275,7 @@ const Cuentas = () => {
           )}
         </Panel>
 
-        <Panel titulo="Nueva cuenta" descripcion="La contraseña se guarda cifrada en el servidor; nunca se muestra ni se almacena en el navegador.">
+        <Panel titulo="Nueva cuenta" className="w-full max-w-3xl" descripcion="La contraseña se guarda cifrada en el servidor; nunca se muestra ni se almacena en el navegador.">
           <form onSubmit={enviar} noValidate className="flex flex-col gap-4 px-5 pb-5">
             {errorGeneral && <Aviso tipo="error">{errorGeneral}</Aviso>}
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

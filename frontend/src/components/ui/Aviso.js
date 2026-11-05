@@ -13,7 +13,7 @@ const Aviso = ({ tipo = 'info', titulo, id, className, onCerrar, children }) => 
   const { icono: Icono, rol, clases } = TIPOS[tipo];
 
   return (
-    <div id={id} role={rol} className={cn('flex items-start gap-3 rounded-xl border px-4 py-3 text-sm', clases, className)}>
+    <div id={id} role={rol} className={cn('flex items-start gap-3 rounded-xl border px-4 py-3.5 text-sm leading-relaxed', clases, className)}>
       <Icono className="mt-0.5 size-4" aria-hidden="true" />
       <div className="min-w-0 flex-1">
         {titulo && <p className="font-semibold">{titulo}</p>}

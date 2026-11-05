@@ -3,11 +3,11 @@ import { cn } from '../../lib/utils';
 
 // Estilo de los controles de formulario (también lo usan buscadores y selectores)
 export const estiloControl = cn(
-  'h-10 w-full rounded-lg border border-input bg-card px-3 text-sm text-foreground shadow-sm',
+  'h-11 w-full rounded-control border border-input bg-card px-3 text-sm text-foreground transition-colors',
   'placeholder:text-muted-foreground',
   'focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/20',
   'disabled:cursor-not-allowed disabled:opacity-60',
-  'aria-[invalid=true]:border-destructive aria-[invalid=true]:ring-destructive/20'
+  'aria-[invalid=true]:border-destructive aria-[invalid=true]:ring-destructive/20 aria-[invalid=true]:focus-visible:border-destructive aria-[invalid=true]:focus-visible:ring-destructive/20'
 );
 
 // Campo de formulario con etiqueta, ayuda y error accesibles.

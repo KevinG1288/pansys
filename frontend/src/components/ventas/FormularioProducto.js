@@ -4,7 +4,7 @@ import { leerNumero, leerTexto, validar } from '../../lib/validacion';
 import Aviso from '../ui/Aviso';
 import Boton from '../ui/Boton';
 import Campo from '../ui/Campo';
-import { Panel } from '../ui/Panel';
+import Dialogo from '../ui/Dialogo';
 
 const CAMPOS = ['nombre', 'precio_compra', 'precio_venta', 'cantidad_disponible'];
 
@@ -65,21 +65,21 @@ const FormularioProducto = ({ onGuardar, onCancelar }) => {
   };
 
   return (
-    <Panel titulo="Nuevo producto" descripcion="Registra un producto para venderlo en el punto de venta.">
-      <form onSubmit={enviar} noValidate className="flex flex-col gap-4 px-5 pb-5">
+    <Dialogo lateral bloqueado={guardando} refFocoInicial={refNombre} onCerrar={onCancelar} className="sm:max-w-2xl" titulo="Nuevo producto" descripcion="Registra un producto para venderlo en el punto de venta.">
+      <form onSubmit={enviar} noValidate className="flex flex-col gap-5">
         {errorGeneral && <Aviso tipo="error">{errorGeneral}</Aviso>}
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 sm:grid-cols-2">
           <Campo ref={refNombre} etiqueta="Nombre" value={valores.nombre} onChange={cambiar('nombre')} error={errores.nombre} placeholder="Ej.: Pan rollo" maxLength={255} />
           <Campo ref={refCompra} etiqueta="Precio de compra (COP)" inputMode="decimal" value={valores.precio_compra} onChange={cambiar('precio_compra')} error={errores.precio_compra} />
           <Campo ref={refVenta} etiqueta="Precio de venta (COP)" inputMode="decimal" value={valores.precio_venta} onChange={cambiar('precio_venta')} error={errores.precio_venta} />
           <Campo ref={refCantidad} etiqueta="Cantidad disponible" inputMode="numeric" value={valores.cantidad_disponible} onChange={cambiar('cantidad_disponible')} error={errores.cantidad_disponible} ayuda="Unidades enteras" />
         </div>
-        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <div className="sticky bottom-0 -mx-5 -mb-5 mt-3 flex flex-col-reverse gap-2 border-t border-border bg-card px-5 py-4 sm:-mx-6 sm:flex-row sm:justify-end sm:px-6">
           <Boton variante="contorno" onClick={onCancelar} disabled={guardando}>Cancelar</Boton>
           <Boton type="submit" cargando={guardando}>Guardar producto</Boton>
         </div>
       </form>
-    </Panel>
+    </Dialogo>
   );
 };
 

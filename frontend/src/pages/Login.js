@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { BookOpenText, ChefHat, Eye, EyeOff, LogIn, Package, ShoppingBasket } from 'lucide-react';
+import { BookOpenText, ChefHat, Eye, EyeOff, LogIn, Package, ShoppingBasket, Wheat } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import { mensajeError } from '../lib/errores';
@@ -86,20 +86,22 @@ const Login = () => {
   const idErrorContrasena = errores.contrasena ? 'login-contrasena-error' : undefined;
 
   return (
-    <div className="pansys-ui grid min-h-screen bg-background lg:grid-cols-[1.1fr_1fr]">
-      <aside className="hidden flex-col justify-between bg-sidebar p-10 text-sidebar-foreground lg:flex">
+    <div className="pansys-ui grid min-h-screen bg-background lg:grid-cols-2">
+      <aside className="pansys-login-hero relative hidden overflow-hidden bg-sidebar p-10 text-sidebar-foreground lg:flex lg:flex-col lg:justify-between xl:p-16">
         <Logo />
-        <div className="max-w-md">
-          <h2 className="font-serif text-4xl font-semibold leading-tight tracking-tight text-sidebar-accent-foreground">
+        <div className="relative z-10 max-w-lg py-10">
+          <div className="mb-8 flex size-20 items-center justify-center rounded-panel border border-sidebar-primary/30 bg-sidebar-primary/10 text-sidebar-primary"><Wheat className="size-10" strokeWidth={1.25} aria-hidden="true" /></div>
+          <p className="mb-4 text-[11px] font-semibold uppercase tracking-[0.2em] text-sidebar-primary">Hecho para tu día a día</p>
+          <h2 className="font-serif text-4xl font-semibold leading-tight tracking-tight text-sidebar-accent-foreground xl:text-5xl">
             Gestión para panaderías de barrio
           </h2>
-          <p className="mt-3 text-sm opacity-75">
+          <p className="mt-3 text-sm leading-relaxed text-sidebar-foreground">
             Inventario, ventas y producción de la panadería en un solo lugar.
           </p>
           <ul className="mt-8 flex flex-col gap-3">
             {MODULOS.map(({ icono: Icono, texto }) => (
               <li key={texto} className="flex items-center gap-3 text-sm">
-                <span className="flex size-8 items-center justify-center rounded-lg bg-sidebar-accent text-sidebar-primary">
+                <span className="flex size-10 shrink-0 items-center justify-center rounded-control border border-sidebar-border bg-sidebar-accent text-sidebar-primary">
                   <Icono className="size-4" aria-hidden="true" />
                 </span>
                 {texto}
@@ -107,16 +109,17 @@ const Login = () => {
             ))}
           </ul>
         </div>
-        <p className="text-xs opacity-50">Localidad de Kennedy · Bogotá</p>
+        <p className="relative z-10 text-xs text-sidebar-foreground">Localidad de Kennedy · Bogotá</p>
       </aside>
 
-      <main className="flex items-center justify-center px-4 py-10">
-        <div className="w-full max-w-sm">
+      <main className="flex min-h-[100svh] items-center justify-center px-5 py-8 sm:px-10 lg:min-h-0 lg:py-12">
+        <div className="w-full max-w-md">
           <div className="mb-8 flex justify-center text-foreground lg:hidden">
             <Logo />
           </div>
-          <div className="rounded-2xl border border-border/80 bg-card p-7 shadow-panel">
-            <h1 className="font-serif text-2xl font-semibold tracking-tight">Iniciar sesión</h1>
+          <div className="rounded-2xl border border-border/80 bg-card p-7 shadow-panel sm:p-10">
+            <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Tu panadería, conectada</p>
+            <h1 className="font-serif text-3xl font-semibold tracking-tight">Iniciar sesión</h1>
             <p className="mt-1 text-sm text-muted-foreground">Usa la cuenta que te asignó el administrador.</p>
 
             <form onSubmit={handleSubmit} noValidate className="mt-6 flex flex-col gap-4">
@@ -170,7 +173,7 @@ const Login = () => {
               </Boton>
             </form>
           </div>
-          <p className="mt-6 text-center text-xs text-muted-foreground">
+          <p className="mx-auto mt-6 max-w-sm text-center text-sm leading-relaxed text-muted-foreground">
             ¿No tienes cuenta? Pídela al administrador de tu panadería.
           </p>
         </div>

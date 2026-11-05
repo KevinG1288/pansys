@@ -11,6 +11,97 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Panadería contemporánea: patrones compartidos de presentación, sin lógica de módulos. */
+@layer components {
+  .pansys-app { color: rgb(var(--foreground)); }
+  .pansys-app main { min-width: 0; }
+  .pansys-panel { isolation: isolate; }
+  .pansys-stat { min-height: 132px; }
+  .pansys-network-card { position: relative; overflow: hidden; }
+  .pansys-login-hero {
+    background-image: radial-gradient(ellipse at 100% 0%, rgb(var(--primary) / .26), transparent 65%);
+  }
+  .pansys-login-hero::after {
+    content: ''; position: absolute; right: -180px; bottom: -260px; width: 540px; height: 540px;
+    border: 1px solid rgb(var(--sidebar-primary) / .18); border-radius: 50%;
+    box-shadow: 0 0 0 64px rgb(var(--sidebar-primary) / .03), 0 0 0 128px rgb(var(--sidebar-primary) / .02);
+    pointer-events: none;
+  }
+  .pansys-network-card::before {
+    content: ''; position: absolute; inset: 0 auto 0 0; width: 3px;
+    background: rgb(var(--primary) / .45);
+  }
+  .pansys-timeline li { position: relative; padding-left: 4px; }
+  .pansys-timeline li::before {
+    content: ''; position: absolute; left: -21px; top: 6px; width: 8px; height: 8px;
+    border: 2px solid white; border-radius: 50%; background: rgb(var(--primary));
+    box-shadow: 0 0 0 1px rgb(var(--border));
+  }
+  .pansys-ui :where(dd) { margin: 3px 0 0; }
+  .pansys-ui :where(fieldset) { min-width: 0; margin: 0; padding: 0; }
+  .pansys-ui :where(input[type='date']) { min-width: 0; }
+  .pansys-ui :where(a) { text-underline-offset: 3px; }
+  .pansys-table :where(td.tabular-nums) { text-align: right; }
+  .pansys-table :where(td) { overflow-wrap: anywhere; }
+  .pansys-ui :where(input, select, textarea) { scroll-margin-block: 96px; }
+  .pansys-ui :where(button, a, input, select, textarea):focus-visible { outline-offset: 3px; }
+  .pansys-table .pansys-data-row:focus-within { background: rgb(var(--accent) / .22); }
+  .pansys-button[aria-busy='true'] { cursor: progress; }
+  .pansys-sidebar-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--sidebar-primary) / .65) rgb(var(--sidebar));
+    touch-action: pan-y;
+  }
+  .pansys-sidebar-scroll::-webkit-scrollbar { width: 5px; }
+  .pansys-sidebar-scroll::-webkit-scrollbar-thumb { background: rgb(var(--sidebar-primary) / .65); border-radius: 999px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pansys-button, .pansys-shortcut { transition: background-color 150ms ease, border-color 150ms ease, transform 150ms ease; }
+  .pansys-button:not(:disabled):active, .pansys-shortcut:active { transform: translateY(1px); }
+  .pansys-shortcut > svg { transition: transform 150ms ease; }
+  .pansys-shortcut:hover > svg { transform: translateX(2px); }
+}
+
+@media (max-width: 639px) {
+  /* Conserva la tabla y sus roles; cada fila presenta los mismos datos en una tarjeta. */
+  .pansys-table-responsive { display: block; }
+  .pansys-table-responsive > thead {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
+  .pansys-table-responsive > tbody { display: grid; gap: 12px; padding: 12px; }
+  .pansys-table-responsive .pansys-data-row {
+    display: block; border: 1px solid rgb(var(--border)); border-radius: 12px;
+    padding: 8px 14px; background: rgb(var(--card));
+  }
+  .pansys-table-responsive .pansys-data-row > td {
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;
+    gap: 6px 12px; min-height: 42px; padding: 8px 0; text-align: right;
+  }
+  .pansys-table-responsive .pansys-data-row > td + td { border-top: 1px solid rgb(var(--border) / .55); }
+  .pansys-table-responsive .pansys-data-row > td::before {
+    content: attr(data-label); margin-right: auto; text-align: left;
+    font-size: 11px; font-weight: 500; color: rgb(var(--muted-foreground));
+  }
+  .pansys-table-responsive .pansys-data-row > td:first-child {
+    display: block; text-align: left; color: rgb(var(--foreground)); font-weight: 600;
+  }
+  .pansys-table-responsive .pansys-data-row > td:first-child::before { display: block; margin-bottom: 4px; }
+  .pansys-table-responsive .pansys-sale-detail { display: block; }
+  .pansys-table-responsive .pansys-sale-detail > td { display: block; padding: 14px; border: 1px solid rgb(var(--border)); border-radius: var(--radius-panel); }
+  .pansys-app .pansys-page-header { padding-bottom: 20px; }
+  .pansys-app .pansys-stat { min-height: 118px; }
+  .pansys-ui button { touch-action: manipulation; }
+  .pansys-ui input, .pansys-ui select, .pansys-ui textarea { font-size: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pansys-ui *, .pansys-ui *::before, .pansys-ui *::after {
+    animation-duration: .01ms !important; transition-duration: .01ms !important;
+  }
+}
+
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
@@ -18,33 +109,36 @@ code {
 
 /* Tema de Pansys (diseño de v0) en canales RGB, usados por tailwind.config.js */
 :root {
-  --background: 251 245 236;
-  --foreground: 52 33 23;
+  --background: 247 246 242;
+  --foreground: 40 37 33;
   --card: 255 255 255;
-  --card-foreground: 52 33 23;
-  --primary: 187 90 55;
+  --card-foreground: 40 37 33;
+  --primary: 166 75 50;
   --primary-foreground: 254 251 248;
-  --secondary: 245 235 222;
-  --secondary-foreground: 68 45 32;
-  --muted: 245 237 228;
-  --muted-foreground: 113 95 83;
-  --accent: 253 228 212;
-  --accent-foreground: 125 51 23;
-  --destructive: 201 48 45;
-  --success: 59 131 78;
-  --warning: 213 141 37;
-  --border: 231 220 208;
-  --input: 228 217 205;
-  --ring: 187 90 55;
+  --secondary: 242 240 235;
+  --secondary-foreground: 57 51 45;
+  --muted: 242 240 235;
+  --muted-foreground: 111 106 99;
+  --accent: 248 232 222;
+  --accent-foreground: 137 57 35;
+  --destructive: 180 48 45;
+  --success: 39 112 75;
+  --warning: 169 100 16;
+  --warning-foreground: 133 77 14;
+  --border: 229 225 218;
+  --input: 141 135 126;
+  --ring: 166 75 50;
   --radius: 0.75rem;
-  --sidebar: 46 29 21;
-  --sidebar-foreground: 230 220 208;
-  --sidebar-primary: 209 107 66;
-  --sidebar-primary-foreground: 254 251 248;
-  --sidebar-accent: 63 43 33;
+  --radius-control: 10px;
+  --radius-panel: 16px;
+  --sidebar: 36 33 30;
+  --sidebar-foreground: 234 229 221;
+  --sidebar-primary: 230 162 125;
+  --sidebar-primary-foreground: 36 33 30;
+  --sidebar-accent: 53 48 43;
   --sidebar-accent-foreground: 252 248 241;
-  --sidebar-border: 69 51 42;
-  --sidebar-ring: 209 107 66;
+  --sidebar-border: 65 59 52;
+  --sidebar-ring: 230 162 125;
 }
 
 @layer base {

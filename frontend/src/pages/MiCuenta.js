@@ -68,7 +68,7 @@ const MiCuenta = () => {
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
         <PageHeader antetitulo="Cuenta" titulo="Mi cuenta" descripcion="Consulta tu sesión y cambia tu contraseña." />
 
-        <Panel titulo="Sesión actual">
+        <Panel titulo="Sesión actual" className="border-primary/15 bg-accent/20">
           <dl className="grid grid-cols-1 gap-4 px-5 pb-5 text-sm sm:grid-cols-2">
             <div>
               <dt className="text-muted-foreground">Correo electrónico</dt>

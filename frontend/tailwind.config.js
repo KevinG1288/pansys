@@ -38,7 +38,7 @@ module.exports = {
         },
         destructive: color('--destructive'),
         success: color('--success'),
-        warning: color('--warning'),
+        warning: { DEFAULT: color('--warning'), foreground: color('--warning-foreground') },
         border: color('--border'),
         input: color('--input'),
         ring: color('--ring'),
@@ -54,18 +54,20 @@ module.exports = {
         }
       },
       borderRadius: {
+        control: 'var(--radius-control)',
+        panel: 'var(--radius-panel)',
         sm: 'calc(var(--radius) * 0.6)',
         md: 'calc(var(--radius) * 0.8)',
         lg: 'var(--radius)',
-        xl: 'calc(var(--radius) * 1.4)',
-        '2xl': 'calc(var(--radius) * 1.8)'
+        xl: 'calc(var(--radius) * 1.166667)',
+        '2xl': 'calc(var(--radius) * 1.333333)'
       },
       fontFamily: {
         sans: ['"DM Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
         serif: ['Fraunces', 'ui-serif', 'Georgia', 'serif']
       },
       boxShadow: {
-        panel: '0 1px 2px rgba(60, 40, 20, 0.04), 0 4px 16px -8px rgba(60, 40, 20, 0.08)'
+        panel: '0 1px 3px rgba(40, 37, 33, 0.03), 0 6px 24px -16px rgba(40, 37, 33, 0.12)'
       },
       keyframes: {
         'entrar-izquierda': {

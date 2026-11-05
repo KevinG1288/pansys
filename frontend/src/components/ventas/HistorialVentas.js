@@ -22,7 +22,7 @@ const HistorialVentas = ({ ventas }) => {
       {ventas.length === 0 ? (
         <EstadoVacio icono={Receipt} titulo="Aún no hay ventas registradas" descripcion="Las ventas aparecerán aquí al registrarlas." />
       ) : (
-        <div className="pb-2">
+        <div>
           <Tabla>
             <TablaEncabezado>
               <tr>
@@ -66,14 +66,14 @@ const HistorialVentas = ({ ventas }) => {
                       </TablaCelda>
                     </TablaFila>
                     {expandida && (
-                      <tr id={idDetalle}>
-                        <td colSpan={6} className="bg-secondary/40 px-5 py-3">
+                      <tr id={idDetalle} className="pansys-sale-detail">
+                        <td colSpan={6} className="border-y border-border/80 bg-background px-5 py-4">
                           {lineas.length === 0 ? (
                             <p className="text-sm text-muted-foreground">Esta venta no tiene detalle.</p>
                           ) : (
                             <ul aria-label={`Productos de la venta #${venta.id}`} className="flex flex-col gap-1.5 text-sm">
                               {lineas.map(l => (
-                                <li key={l.id} className="flex justify-between gap-4">
+                                <li key={l.id} className="flex flex-wrap justify-between gap-2 border-b border-border/60 py-2 last:border-b-0">
                                   <span>
                                     {l.Producto?.nombre ?? `Producto #${l.producto_id}`} × {formatNumber(l.cantidad)}
                                     <span className="text-muted-foreground"> · {formatCOP(l.precio_unitario)} c/u</span>

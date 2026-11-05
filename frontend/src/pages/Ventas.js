@@ -117,16 +117,16 @@ const Ventas = () => {
           titulo="Ventas"
           descripcion="Registra ventas en el punto de venta y consulta el historial de la panadería."
           acciones={
-            <>
-              <Boton variante="contorno" onClick={abrirFormProducto} disabled={!escribe || mostrarFormProducto} aria-describedby={descritoPor}>
-                <Plus className="size-4" aria-hidden="true" />
-                Nuevo producto
-              </Boton>
-              <Boton onClick={abrirPuntoVenta} disabled={!escribe || mostrarPuntoVenta} aria-describedby={descritoPor}>
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3">
+              <Boton className="w-full sm:order-2 sm:w-auto" onClick={abrirPuntoVenta} disabled={!escribe || mostrarPuntoVenta} aria-describedby={descritoPor}>
                 <ShoppingBasket className="size-4" aria-hidden="true" />
                 Nueva venta
               </Boton>
-            </>
+              <Boton className="w-full sm:w-auto" variante="contorno" onClick={abrirFormProducto} disabled={!escribe || mostrarFormProducto} aria-describedby={descritoPor}>
+                <Plus className="size-4" aria-hidden="true" />
+                Nuevo producto
+              </Boton>
+            </div>
           }
         />
 

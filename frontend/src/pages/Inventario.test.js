@@ -25,12 +25,46 @@ const PANADERO = { id: 2, email: 'panadero@pansys.com', rol: 'panadero', rol_id:
 const GERENTE = { id: 4, email: 'gerente@pansys.com', rol: 'gerente', rol_id: 3, panaderia_id: 1 };
 
 // Forma real de GET /api/inventario
-const insumo = (datos) => ({ unidad_medida: 'kg', panaderia_id: 1, estado: true, createdAt: '2026-10-13T15:00:00.000Z', updatedAt: '2026-10-13T15:00:00.000Z', ...datos });
+const insumo = (datos) => ({ version_fila: 0, unidad_medida: 'kg', panaderia_id: 1, estado: true, createdAt: '2026-10-13T15:00:00.000Z', updatedAt: '2026-10-13T15:00:00.000Z', ...datos });
 const INSUMOS = [
   insumo({ id: 7, nombre: 'Harina de trigo', cantidad_disponible: 10, stock_minimo: 2, precio_unitario: 3000 }),
   insumo({ id: 8, nombre: 'Azúcar', cantidad_disponible: 2, stock_minimo: 2, precio_unitario: 4000 }), // igual al mínimo: stock bajo
   insumo({ id: 9, nombre: 'Levadura', unidad_medida: 'g', cantidad_disponible: 0, stock_minimo: 100, precio_unitario: 50 }) // sin existencias
 ];
+
+describe('Versiones del inventario', () => {
+  test('409 conserva lo escrito, carga la nueva versión solo a petición y exige guardar manualmente', async () => {
+    api.put.mockRejectedValueOnce({ response: { status: 409, data: { codigo: 'VERSION_DESACTUALIZADA', error: 'El insumo cambió desde que se consultó.' } } });
+    await renderizar(); userEvent.click(screen.getByRole('button', { name: 'Editar Harina de trigo' }));
+    escribir('Cantidad disponible', '25'); userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+    await screen.findByText('El insumo cambió desde que se consultó.'); expect(campo('Cantidad disponible')).toHaveValue('25');
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeDisabled(); expect(api.put).toHaveBeenCalledTimes(1);
+    const actual = { ...INSUMOS[0], version_fila: 4, cantidad_disponible: 8 };
+    api.get.mockImplementation(url => Promise.resolve({ data: url === '/api/inventario/7' ? actual : [actual, ...INSUMOS.slice(1)] }));
+    userEvent.click(screen.getByRole('button', { name: 'Cargar versión actual' }));
+    await waitFor(() => expect(campo('Cantidad disponible')).toHaveValue('8'));
+    expect(api.put).toHaveBeenCalledTimes(1); api.put.mockResolvedValueOnce({ data: actual });
+    userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+    await waitFor(() => expect(api.put).toHaveBeenLastCalledWith('/api/inventario/7', expect.objectContaining({ version_fila: 4, cantidad_disponible: 8 })));
+  });
+  test('DELETE con conflicto actualiza sin borrar y requiere una segunda confirmación', async () => {
+    api.delete.mockRejectedValueOnce({ response: { status: 409, data: { codigo: 'VERSION_DESACTUALIZADA', error: 'Versión antigua' } } });
+    await renderizar(); userEvent.click(screen.getByRole('button', { name: 'Eliminar Azúcar' }));
+    userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Eliminar' }));
+    await screen.findByText(/Actualiza los datos y vuelve a confirmar/);
+    const actual = { ...INSUMOS[1], version_fila: 3 };
+    api.get.mockImplementation(url => Promise.resolve({ data: url === '/api/inventario/8' ? actual : INSUMOS }));
+    userEvent.click(screen.getByRole('button', { name: 'Actualizar datos' }));
+    await screen.findByRole('button', { name: 'Eliminar', exact: true }); expect(api.delete).toHaveBeenCalledTimes(1);
+    api.delete.mockResolvedValueOnce({ data: {} }); userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Eliminar' }));
+    await waitFor(() => expect(api.delete).toHaveBeenLastCalledWith('/api/inventario/8', { data: { version_fila: 3 } }));
+  });
+  test('versión agotada muestra el mensaje del backend sin reintentos', async () => {
+    api.put.mockRejectedValueOnce({ response: { status: 409, data: { codigo: 'VERSION_AGOTADA', error: 'La materia prima alcanzó el límite de versiones' } } });
+    await renderizar(); userEvent.click(screen.getByRole('button', { name: 'Editar Harina de trigo' })); userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+    expect(await screen.findByText('La materia prima alcanzó el límite de versiones')).toBeInTheDocument(); expect(api.put).toHaveBeenCalledTimes(1);
+  });
+});
 
 // Promesa controlable para simular una petición pendiente
 const diferida = () => {
@@ -266,6 +300,7 @@ describe('Editar insumo', () => {
 
     await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1));
     expect(api.put).toHaveBeenCalledWith('/api/inventario/7', {
+      version_fila: 0,
       nombre: 'Harina de trigo',
       unidad_medida: 'kg',
       cantidad_disponible: 12.5,
@@ -378,7 +413,7 @@ describe('Eliminar insumo', () => {
     userEvent.click(screen.getByRole('button', { name: 'Eliminar Azúcar' }));
     userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Eliminar' }));
 
-    await waitFor(() => expect(api.delete).toHaveBeenCalledWith('/api/inventario/8'));
+    await waitFor(() => expect(api.delete).toHaveBeenCalledWith('/api/inventario/8', { data: { version_fila: 0 } }));
     expect(api.delete).toHaveBeenCalledTimes(1);
     expect(await screen.findByText('«Azúcar» se eliminó del inventario.')).toBeInTheDocument();
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();

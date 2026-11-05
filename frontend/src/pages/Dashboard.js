@@ -12,7 +12,7 @@ import Sidebar from '../components/layout/Sidebar';
 import Topbar from '../components/layout/Topbar';
 import MenuMovil from '../components/layout/MenuMovil';
 import { etiquetaModulo } from '../components/layout/navegacion';
-import ModuloPendiente from '../components/ModuloPendiente';
+import Colaboracion from './Colaboracion';
 
 const Dashboard = () => {
   const { usuario, logout } = useAuth();
@@ -31,8 +31,7 @@ const Dashboard = () => {
       case 'ventas': return <Ventas />;
       case 'produccion': return <Produccion />;
       case 'recetas': return <Recetas />;
-      // Red colaborativa: el backend no tiene modelos ni endpoints todavía
-      case 'colaboracion': return <ModuloPendiente modulo={moduloActivo} />;
+      case 'colaboracion': return <Colaboracion />;
       // Solo aparece en el menú del administrador; la página también lo comprueba
       case 'cuentas': return <Cuentas />;
       case 'micuenta': return <MiCuenta />;
@@ -41,7 +40,7 @@ const Dashboard = () => {
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="pansys-app min-h-screen bg-background">
       {/* Con el menú móvil abierto, el resto de la pantalla queda inerte (sin foco ni clics) */}
       <div className="flex min-h-screen" inert={menuAbierto} data-testid="contenido-principal">
         <aside className="pansys-ui sticky top-0 hidden h-screen w-64 shrink-0 lg:block">

@@ -5,7 +5,7 @@ import { leerNumero } from '../../lib/validacion';
 import Aviso from '../ui/Aviso';
 import Boton from '../ui/Boton';
 import Campo from '../ui/Campo';
-import { Panel } from '../ui/Panel';
+import Dialogo from '../ui/Dialogo';
 import Selector from '../ui/Selector';
 
 const MAX_INSUMOS = 50; // límite del backend
@@ -76,11 +76,11 @@ const EditorReceta = ({ receta, materias, onGuardar, onCancelar }) => {
   };
 
   return (
-    <Panel
+    <Dialogo lateral bloqueado={guardando} refFocoInicial={refPrimero} onCerrar={onCancelar} className="sm:max-w-2xl"
       titulo={existe ? `Editar receta de «${receta.producto}»` : `Crear receta de «${receta.producto}»`}
       descripcion="Indica cuánto de cada materia prima se necesita para elaborar UNA unidad del producto."
     >
-      <form onSubmit={enviar} noValidate className="flex flex-col gap-4 px-5 pb-5">
+      <form onSubmit={enviar} noValidate className="flex flex-col gap-5">
         {errorGeneral && <Aviso tipo="error">{errorGeneral}</Aviso>}
         {errores.general && <Aviso tipo="error">{errores.general}</Aviso>}
         {materias.length === 0 && (
@@ -141,12 +141,12 @@ const EditorReceta = ({ receta, materias, onGuardar, onCancelar }) => {
           </Boton>
         </div>
 
-        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <div className="sticky bottom-0 -mx-5 -mb-5 mt-3 flex flex-col-reverse gap-2 border-t border-border bg-card px-5 py-4 sm:-mx-6 sm:flex-row sm:justify-end sm:px-6">
           <Boton variante="contorno" onClick={onCancelar} disabled={guardando}>Cancelar</Boton>
           <Boton type="submit" cargando={guardando}>{existe ? 'Guardar cambios' : 'Crear receta'}</Boton>
         </div>
       </form>
-    </Panel>
+    </Dialogo>
   );
 };
 

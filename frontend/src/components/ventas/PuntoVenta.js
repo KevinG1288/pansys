@@ -70,7 +70,7 @@ const PuntoVenta = ({ productos, onRegistrar, onCerrar }) => {
         </Boton>
       }
     >
-      <div className="grid grid-cols-1 gap-6 px-5 pb-5 lg:grid-cols-[1fr_340px]">
+      <div className="grid grid-cols-1 items-start gap-5 px-5 pb-5 lg:grid-cols-[minmax(0,1fr)_340px]">
         <section aria-label="Productos disponibles">
           {productos.length === 0 ? (
             <EstadoVacio
@@ -111,10 +111,10 @@ const PuntoVenta = ({ productos, onRegistrar, onCerrar }) => {
           )}
         </section>
 
-        <section aria-label="Carrito" className="flex flex-col gap-3 rounded-xl border border-border bg-secondary/40 p-4">
-          <h3 className="text-sm font-semibold">Carrito</h3>
+        <section aria-label="Carrito" className="flex flex-col gap-4 rounded-2xl border border-primary/20 bg-background p-5 lg:sticky lg:top-20">
+          <div className="flex items-center justify-between gap-3"><h3 className="flex items-center gap-2 text-sm font-semibold"><ShoppingBasket className="size-4 text-primary" aria-hidden="true" />Carrito</h3><span className="rounded-full bg-card px-2.5 py-1 text-xs text-muted-foreground">{lineas.length} {lineas.length === 1 ? 'producto' : 'productos'}</span></div>
           {lineas.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Selecciona productos para agregarlos.</p>
+            <div className="rounded-xl border border-dashed border-border bg-card/60 p-4"><p className="text-sm text-muted-foreground">Selecciona productos para agregarlos.</p><p className="mt-2 text-xs text-muted-foreground">Después ajusta las cantidades con + y −. El stock se descuenta al registrar.</p></div>
           ) : (
             <ul className="flex flex-col divide-y divide-border/70">
               {lineas.map(l => {
@@ -134,20 +134,20 @@ const PuntoVenta = ({ productos, onRegistrar, onCerrar }) => {
                         <Boton
                           variante="contorno"
                           tamano="icono"
-                          className="size-8"
+                          className="size-11"
                           onClick={() => cambiarCantidad(l.producto_id, -1)}
                           disabled={l.cantidad <= 1 || enviando}
                           aria-label={`Quitar una unidad de ${nombre}`}
                         >
                           <Minus className="size-3.5" aria-hidden="true" />
                         </Boton>
-                        <span className="w-8 text-center text-sm font-semibold tabular-nums" aria-label={`Cantidad de ${nombre}`}>
+                        <span className="min-w-9 text-center text-base font-semibold tabular-nums" aria-live="polite" aria-atomic="true" aria-label={`Cantidad de ${nombre}`}>
                           {l.cantidad}
                         </span>
                         <Boton
                           variante="contorno"
                           tamano="icono"
-                          className="size-8"
+                          className="size-11"
                           onClick={() => cambiarCantidad(l.producto_id, 1)}
                           disabled={l.cantidad >= l.stock || enviando}
                           aria-label={`Añadir una unidad de ${nombre}`}
@@ -158,7 +158,7 @@ const PuntoVenta = ({ productos, onRegistrar, onCerrar }) => {
                       <Boton
                         variante="fantasma"
                         tamano="icono"
-                        className="size-8 text-destructive hover:bg-destructive/10"
+                        className="size-11 text-destructive hover:bg-destructive/10"
                         onClick={() => quitar(l.producto_id)}
                         disabled={enviando}
                         aria-label={`Quitar ${nombre} del carrito`}
@@ -177,15 +177,16 @@ const PuntoVenta = ({ productos, onRegistrar, onCerrar }) => {
             </ul>
           )}
 
-          {error && <Aviso tipo="error">{error}</Aviso>}
+          {error && <Aviso tipo="error">{error}<p className="mt-1 text-xs">Tu selección se conserva. Revisa las cantidades y el stock antes de volver a registrar.</p></Aviso>}
 
           <div className="mt-auto flex items-center justify-between border-t border-border pt-3">
             <span className="text-sm text-muted-foreground">Total</span>
-            <span className="font-serif text-xl font-semibold tabular-nums" aria-label="Total de la venta">{formatCOP(total)}</span>
+            <span className="font-sans text-3xl font-semibold tracking-tight tabular-nums" aria-live="polite" aria-atomic="true" aria-label="Total de la venta">{formatCOP(total)}</span>
           </div>
           <Boton onClick={registrar} cargando={enviando} disabled={lineas.length === 0} className="w-full">
             Registrar venta
           </Boton>
+          <p className="text-center text-xs leading-relaxed text-muted-foreground">Revisa cantidades y total antes de registrar. El servidor confirma el importe final.</p>
         </section>
       </div>
     </Panel>

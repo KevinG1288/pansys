@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowRight, ChefHat, Croissant, PackageSearch, Receipt, TriangleAlert, Wallet } from 'lucide-react';
+import { ArrowRight, ChefHat, Croissant, Handshake, PackageSearch, Receipt, TriangleAlert, Wallet } from 'lucide-react';
 import api from '../services/api';
 import { cn } from '../lib/utils';
 import { mensajeError } from '../lib/errores';
@@ -101,6 +101,8 @@ const ResumenDashboard = ({ onIrA }) => {
           descripcion="Así va tu panadería hoy: ventas, producción en curso e insumos que necesitan atención."
         />
 
+
+
         {fallidas.length > 0 && (
           <Aviso tipo="error" titulo="Parte del resumen no está disponible">
             {fallidas.map(f => <p key={f}>{errores[f]}</p>)}
@@ -128,7 +130,7 @@ const ResumenDashboard = ({ onIrA }) => {
             nota={resumen.enProceso ? `${resumen.finalizadasHoy} finalizadas hoy` : undefined}
           />
           <StatCard
-            tono="alerta"
+            tono={resumen.alertas?.length > 0 ? 'alerta' : 'normal'}
             etiqueta="Alertas de inventario"
             valor={valor('insumos', String(resumen.alertas?.length ?? 0))}
             icono={TriangleAlert}
@@ -136,7 +138,22 @@ const ResumenDashboard = ({ onIrA }) => {
           />
         </section>
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 xl:grid-cols-3">
+        <section aria-label="Accesos rápidos" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {[
+            ['ventas', 'Ir a ventas', 'Punto de venta e historial', Receipt],
+            ['inventario', 'Ir a inventario', 'Existencias y reposición', PackageSearch],
+            ['produccion', 'Ir a producción', 'Órdenes y seguimiento', ChefHat],
+            ['colaboracion', 'Ir a red colaborativa', 'Solicitudes y recursos', Handshake]
+          ].map(([id, texto, ayuda, Icono]) => <button key={id} type="button" aria-label={texto} onClick={() => onIrA(id)}
+            className="pansys-shortcut group flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-4 text-left transition-colors hover:border-primary/40 hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <span className="rounded-xl bg-accent/60 p-2.5 text-primary"><Icono className="size-5" aria-hidden="true" /></span>
+            <span className="min-w-0"><span className="block text-sm font-semibold">{texto}</span><span className="mt-0.5 hidden text-xs text-muted-foreground sm:block">{ayuda}</span></span>
+            <ArrowRight className="ml-auto hidden size-4 text-muted-foreground group-hover:text-primary xl:block" aria-hidden="true" />
+          </button>)}
+        </section>
+
+        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Prioridades de tu jornada</p>
+        <div className="-mt-3 grid grid-cols-1 gap-6 lg:grid-cols-2 xl:grid-cols-3" data-composition="attention-first">
           <Panel
             titulo="Alertas de inventario"
             descripcion="Insumos en su mínimo o por debajo"

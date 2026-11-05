@@ -42,6 +42,7 @@ const TablaOrdenes = ({ ordenes, puedeEditar, descritoPor, onVer, onFinalizar, o
 
   return (
     <section aria-label="Órdenes de producción" className="rounded-2xl border border-border/80 bg-card shadow-panel">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-5 pb-1 pt-5"><h2 className="text-base font-semibold">Seguimiento de órdenes</h2><span className="text-xs text-muted-foreground">{filas.length} de {ordenes.length} órdenes</span></div>
       <div className="border-b border-border/70 p-4">
         <div role="group" aria-label="Filtrar órdenes por estado" className="flex flex-wrap gap-1.5">
           {FILTROS.map(f => (

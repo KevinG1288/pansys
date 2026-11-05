@@ -6,7 +6,7 @@ import { leerNumero, leerTexto } from '../../lib/validacion';
 import Aviso from '../ui/Aviso';
 import Boton from '../ui/Boton';
 import Campo from '../ui/Campo';
-import { Panel } from '../ui/Panel';
+import Dialogo from '../ui/Dialogo';
 import Selector from '../ui/Selector';
 import StatusBadge from '../ui/StatusBadge';
 import { Tabla, TablaCelda, TablaColumna, TablaCuerpo, TablaEncabezado, TablaFila } from '../ui/Tabla';
@@ -127,9 +127,9 @@ const FormularioOrden = ({ recetas, onCalcular, onCrear, onCancelar }) => {
   };
 
   return (
-    <Panel titulo="Nueva orden de producción" descripcion="Al crearla se descuentan los insumos de la receta del inventario.">
-      <form onSubmit={enviar} noValidate className="flex flex-col gap-4 px-5 pb-5">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+    <Dialogo lateral bloqueado={guardando} refFocoInicial={refProducto} onCerrar={onCancelar} className="sm:max-w-2xl" titulo="Nueva orden de producción" descripcion="Al crearla se descuentan los insumos de la receta del inventario.">
+      <form onSubmit={enviar} noValidate className="flex flex-col gap-5">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Selector
             ref={refProducto}
             etiqueta="Producto"
@@ -188,7 +188,7 @@ const FormularioOrden = ({ recetas, onCalcular, onCrear, onCancelar }) => {
           </div>
         )}
 
-        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <div className="sticky bottom-0 -mx-5 -mb-5 mt-3 flex flex-col-reverse gap-2 border-t border-border bg-card px-5 py-4 sm:-mx-6 sm:flex-row sm:justify-end sm:px-6">
           <Boton variante="contorno" onClick={onCancelar} disabled={guardando}>Cancelar</Boton>
           <Boton variante="contorno" onClick={calcular} cargando={calculando} disabled={guardando}>
             <Calculator className="size-4" aria-hidden="true" />
@@ -197,7 +197,7 @@ const FormularioOrden = ({ recetas, onCalcular, onCrear, onCancelar }) => {
           <Boton type="submit" cargando={guardando} disabled={calculando}>Crear orden</Boton>
         </div>
       </form>
-    </Panel>
+    </Dialogo>
   );
 };
 

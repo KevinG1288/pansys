@@ -4,7 +4,7 @@ import { leerNumero, leerTexto, MAXIMO_DECIMAL_12_4, validar } from '../../lib/v
 import Aviso from '../ui/Aviso';
 import Boton from '../ui/Boton';
 import Campo from '../ui/Campo';
-import { Panel } from '../ui/Panel';
+import Dialogo from '../ui/Dialogo';
 
 const CAMPOS = ['nombre', 'unidad_medida', 'cantidad_disponible', 'stock_minimo', 'precio_unitario'];
 
@@ -34,11 +34,12 @@ const valoresIniciales = (insumo) => ({
 
 // Formulario de alta y edición. Valida, convierte (textos recortados y números JSON)
 // y entrega los datos a onGuardar, que hace la petición; si falla, muestra el error del backend.
-const FormularioInsumo = ({ insumo, onGuardar, onCancelar }) => {
+const FormularioInsumo = ({ insumo, onGuardar, onCancelar, onRecargar }) => {
   const editando = Boolean(insumo);
   const [valores, setValores] = useState(() => valoresIniciales(insumo));
   const [errores, setErrores] = useState({});
   const [errorGeneral, setErrorGeneral] = useState(null);
+  const [conflicto, setConflicto] = useState(false);
   const [guardando, setGuardando] = useState(false);
   const guardandoRef = useRef(false);
 
@@ -65,7 +66,7 @@ const FormularioInsumo = ({ insumo, onGuardar, onCancelar }) => {
 
   const enviar = async (evento) => {
     evento.preventDefault();
-    if (guardandoRef.current) return;
+    if (guardandoRef.current || conflicto) return;
 
     const { datos, errores: nuevosErrores, valido } = validar(valores, REGLAS);
     setErrores(nuevosErrores);
@@ -82,6 +83,7 @@ const FormularioInsumo = ({ insumo, onGuardar, onCancelar }) => {
       await onGuardar(datos);
       // Si sale bien, Inventario cierra el formulario (este componente se desmonta)
     } catch (error) {
+      setConflicto(error.response?.status === 409 && error.response?.data?.codigo === 'VERSION_DESACTUALIZADA');
       setErrorGeneral(mensajeError(error, 'No se pudo guardar el insumo.'));
       guardandoRef.current = false;
       setGuardando(false);
@@ -89,13 +91,23 @@ const FormularioInsumo = ({ insumo, onGuardar, onCancelar }) => {
   };
 
   return (
-    <Panel
+    <Dialogo lateral bloqueado={guardando} refFocoInicial={refNombre} onCerrar={onCancelar}
       titulo={editando ? `Editar «${insumo.nombre}»` : 'Nuevo insumo'}
       descripcion={editando ? 'Actualiza los datos de la materia prima.' : 'Registra una nueva materia prima en el inventario.'}
     >
-      <form onSubmit={enviar} noValidate className="flex flex-col gap-4 px-5 pb-5">
+      <form onSubmit={enviar} noValidate className="flex flex-col gap-5">
         {errorGeneral && <Aviso tipo="error">{errorGeneral}</Aviso>}
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {conflicto && <Aviso tipo="info">
+          <p>El insumo cambió mientras lo editabas. Tus datos escritos se conservan. Para continuar, carga la versión actual; esta acción reemplazará los valores del formulario. Después revisa y guarda manualmente.</p>
+          <Boton variante="contorno" className="mt-3" cargando={guardando} onClick={async () => {
+            if (guardandoRef.current) return;
+            guardandoRef.current = true; setGuardando(true);
+            try { await onRecargar(); }
+            catch (e) { setErrorGeneral(mensajeError(e, e.message || 'No se pudo actualizar el insumo.')); }
+            finally { guardandoRef.current = false; setGuardando(false); }
+          }}>Cargar versión actual</Boton>
+        </Aviso>}
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
           <Campo
             ref={refNombre}
             etiqueta="Nombre"
@@ -142,16 +154,16 @@ const FormularioInsumo = ({ insumo, onGuardar, onCancelar }) => {
             ayuda="Hasta 4 decimales"
           />
         </div>
-        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <div className="pansys-form-actions sticky bottom-0 -mx-5 -mb-5 mt-2 flex flex-col-reverse gap-2 border-t border-border bg-card px-5 py-4 sm:-mx-6 sm:flex-row sm:justify-end sm:px-6">
           <Boton variante="contorno" onClick={onCancelar} disabled={guardando}>
             Cancelar
           </Boton>
-          <Boton type="submit" cargando={guardando}>
+          <Boton type="submit" cargando={guardando} disabled={conflicto}>
             {editando ? 'Guardar cambios' : 'Guardar insumo'}
           </Boton>
         </div>
       </form>
-    </Panel>
+    </Dialogo>
   );
 };
 

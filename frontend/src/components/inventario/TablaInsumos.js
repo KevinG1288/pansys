@@ -73,7 +73,8 @@ const TablaInsumos = ({ insumos, puedeEditar, descritoPor, onEditar, onEliminar 
 
   return (
     <section aria-label="Insumos" className="rounded-2xl border border-border/80 bg-card shadow-panel">
-      <div className="flex flex-col gap-3 border-b border-border/70 p-4 md:flex-row md:items-center md:justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-5 pb-3 pt-5"><h2 className="text-base font-semibold">Materias primas</h2><span className="text-xs text-muted-foreground">{filas.length} de {insumos.length} insumos</span></div>
+      <div className="flex flex-col gap-3 border-b border-border/70 px-4 pb-4 md:flex-row md:items-center md:justify-between">
         <div role="group" aria-label="Filtrar por estado" className="flex flex-wrap gap-1.5">
           {FILTROS.map(f => (
             <button
@@ -117,7 +118,9 @@ const TablaInsumos = ({ insumos, puedeEditar, descritoPor, onEditar, onEliminar 
           icono={PackageSearch}
           titulo="No encontramos insumos"
           descripcion="Prueba con otro nombre o cambia el filtro de estado."
-        />
+        >
+          <Boton variante="contorno" onClick={() => { setBusqueda(''); setFiltro('todos'); }}>Limpiar filtros</Boton>
+        </EstadoVacio>
       ) : (
         <Tabla>
           <TablaEncabezado>

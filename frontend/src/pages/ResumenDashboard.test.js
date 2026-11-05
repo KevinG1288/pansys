@@ -71,6 +71,18 @@ beforeEach(() => {
   simularGet();
 });
 
+test('los accesos rápidos abren los módulos existentes sin enviar operaciones', async () => {
+  const ir = jest.fn();
+  render(<ResumenDashboard onIrA={ir} />);
+  await screen.findByRole('list', { name: 'Insumos con alerta' });
+  const accesos = within(screen.getByRole('region', { name: 'Accesos rápidos' }));
+  for (const [nombre, id] of [['Ir a ventas', 'ventas'], ['Ir a inventario', 'inventario'], ['Ir a producción', 'produccion'], ['Ir a red colaborativa', 'colaboracion']]) {
+    userEvent.click(accesos.getByRole('button', { name: nombre }));
+    expect(ir).toHaveBeenLastCalledWith(id);
+  }
+  expect(api.get).toHaveBeenCalledTimes(4);
+});
+
 test('muestra los indicadores del día calculados con los datos reales', async () => {
   render(<ResumenDashboard onIrA={jest.fn()} />);
   await screen.findByRole('list', { name: 'Insumos con alerta' });

@@ -136,15 +136,13 @@ describe('Estructura y navegación', () => {
     await screen.findByText('No hay productos');
   });
 
-  test('Red colaborativa muestra el aviso sin llamar a la API (no tiene backend)', async () => {
+  test('Red colaborativa abre el modulo y consulta los endpoints reales', async () => {
     await renderizarDashboard();
-    const llamadasPrevias = api.get.mock.calls.length;
-
     userEvent.click(within(menuEscritorio()).getByRole('button', { name: 'Red colaborativa' }));
-
     expect(screen.getByRole('heading', { level: 1, name: 'Red colaborativa' })).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent(AVISO_PENDIENTE);
-    expect(api.get).toHaveBeenCalledTimes(llamadasPrevias);
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/red/panaderias'));
+    expect(api.get).toHaveBeenCalledWith('/api/red/resumen');
+    expect(screen.queryByText(AVISO_PENDIENTE)).not.toBeInTheDocument();
   });
 
   test('Producción y Recetas abren sus pantallas y consultan sus endpoints reales', async () => {

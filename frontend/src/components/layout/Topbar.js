@@ -2,7 +2,7 @@ import { Menu } from 'lucide-react';
 
 // Cabecera: botón de menú (solo pantallas estrechas), módulo actual y usuario autenticado
 const Topbar = ({ titulo, usuario, onAbrirMenu }) => (
-  <header className="pansys-ui sticky top-0 z-30 border-b border-border/70 bg-background/85 backdrop-blur-md">
+  <header className="pansys-ui sticky top-0 z-30 border-b border-border/80 bg-card/95 backdrop-blur-md">
     <div className="flex h-16 items-center gap-3 px-4 md:px-6 lg:px-8">
       <button
         type="button"
@@ -13,7 +13,7 @@ const Topbar = ({ titulo, usuario, onAbrirMenu }) => (
         <Menu className="size-5" aria-hidden="true" />
       </button>
 
-      <p className="font-serif text-lg font-semibold tracking-tight">{titulo}</p>
+      <div className="flex min-w-0 items-center gap-2 text-sm"><span className="hidden text-muted-foreground sm:inline">Mi espacio</span><span className="hidden text-border sm:inline" aria-hidden="true">/</span><p className="truncate font-medium">{titulo}</p></div>
 
       <div className="ml-auto flex items-center gap-2.5">
         <span
