@@ -128,9 +128,22 @@ const contarNombresPropiosFuera = async () => {
   return productos + materias;
 };
 
-// Ajusta el stock de una materia prima mediante la API (como lo haría el panadero)
-const fijarStock = (id, cantidad) =>
-  pedir('PUT', `/api/inventario/${id}`, 'panaderoa', { cantidad_disponible: cantidad });
+// version_fila vigente de una materia prima de la panadería temporal A (null si no existe allí)
+const versionDe = async (id) => {
+  const fila = (await sequelize.query(
+    'SELECT version_fila AS v FROM pansys_test.materia_prima WHERE id = ? AND panaderia_id = ?',
+    { replacements: [id ?? 0, panaderiaA ?? 0] }))[0][0];
+  return fila ? Number(fila.v) : null;
+};
+
+// Ajusta el stock de una materia prima mediante la API (como lo haría el panadero). La versión se
+// lee justo antes de cada ajuste, porque las órdenes también la incrementan, y se exige 200: un
+// ajuste rechazado no pasa en silencio.
+const fijarStock = async (id, cantidad) => {
+  const r = await pedir('PUT', `/api/inventario/${id}`, 'panaderoa', { cantidad_disponible: cantidad, version_fila: await versionDe(id) });
+  registrar(r.status === 200, `ajuste de stock a ${cantidad} -> 200`, `HTTP ${r.status}: ${JSON.stringify(r.datos)}`);
+  return r;
+};
 
 // ---------- Servidor de la API (mismo ciclo de vida que inventario.pruebas.js) ----------
 // app.js llama a app.listen() de forma asíncrona (después de sequelize.authenticate()). Sustituir

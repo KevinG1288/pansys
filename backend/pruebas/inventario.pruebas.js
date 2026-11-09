@@ -88,6 +88,16 @@ const enBaseB = async (id) => (await sequelize.query(
    FROM pansys_test.materia_prima WHERE id = ? AND panaderia_id = ?`,
   { replacements: [id ?? 0, panaderiaB] }))[0][0];
 
+// version_fila vigente de una materia prima de una panadería temporal (contrato de PUT y DELETE
+// desde SQL006). null si la fila no existe en esa panadería: el envío fallará de forma visible.
+const versionDe = async (id, panaderia) => {
+  const fila = (await sequelize.query(
+    'SELECT version_fila AS v FROM pansys_test.materia_prima WHERE id = ? AND panaderia_id = ?',
+    { replacements: [id ?? 0, panaderia ?? 0] }))[0][0];
+  return fila ? Number(fila.v) : null;
+};
+const MENSAJE_SIN_VERSION = 'version_fila debe ser un entero entre 0 y 4294967294';
+
 const contar = async () => Number((await sequelize.query(
   'SELECT COUNT(*) AS n FROM pansys_test.materia_prima WHERE panaderia_id = ?', { replacements: [panaderiaId] }))[0][0].n);
 
@@ -264,13 +274,29 @@ const main = async () => {
   // ---------- Edición ----------
   await ejecucion.exigirBloqueo();
   console.log('\n== Edición (PUT)');
+  const versionInicial = await versionDe(fino?.id, panaderiaId);
+  igual('la materia prima recién creada tiene version_fila 0', versionInicial, 0);
   const editado = await esperar('editar solo el precio con 4 decimales -> 200', 200, 'PUT', `/api/inventario/${fino?.id}`,
-    { precio_unitario: '7.0005' });
+    { precio_unitario: '7.0005', version_fila: versionInicial });
   igual('el precio cambia y lo demás se conserva', await enBase(fino?.id), { disponible: '0.0001', minimo: '0.1250', precio: '7.0005' });
   igual('la respuesta devuelve el precio exacto', editado?.precio_unitario, 7.0005);
-  await esperar('editar con valor inválido -> 400', 400, 'PUT', `/api/inventario/${fino?.id}`, { cantidad_disponible: '5.12345' });
-  await esperar('editar fuera de rango -> 400', 400, 'PUT', `/api/inventario/${fino?.id}`, { stock_minimo: '100000000' });
+  const versionEditada = await versionDe(fino?.id, panaderiaId);
+  igual('la edición avanza version_fila en 1 (respuesta y base)', [editado?.version_fila, versionEditada], [1, 1]);
+  // Con la versión vigente: el rechazo se debe al valor, no a la versión
+  const invalido = await esperar('editar con valor inválido -> 400', 400, 'PUT', `/api/inventario/${fino?.id}`,
+    { cantidad_disponible: '5.12345', version_fila: versionEditada });
+  igual('editar con valor inválido: el error nombra el campo', (invalido?.error ?? '').includes('cantidad_disponible'), true);
+  const fueraDeRango = await esperar('editar fuera de rango -> 400', 400, 'PUT', `/api/inventario/${fino?.id}`,
+    { stock_minimo: '100000000', version_fila: versionEditada });
+  igual('editar fuera de rango: el error nombra el campo', (fueraDeRango?.error ?? '').includes('stock_minimo'), true);
+  // Contrato de version_fila: ausente -> 400; desactualizada -> 409. Ninguno de los dos modifica nada
+  const sinVersion = await esperar('editar sin version_fila -> 400', 400, 'PUT', `/api/inventario/${fino?.id}`, { precio_unitario: '8.0001' });
+  igual('sin version_fila: el error lo indica', sinVersion?.error, MENSAJE_SIN_VERSION);
+  const desactualizada = await esperar('editar con version_fila desactualizada -> 409', 409, 'PUT', `/api/inventario/${fino?.id}`,
+    { precio_unitario: '8.0001', version_fila: versionInicial });
+  igual('versión desactualizada: código VERSION_DESACTUALIZADA', desactualizada?.codigo, 'VERSION_DESACTUALIZADA');
   igual('las ediciones rechazadas no cambian nada', await enBase(fino?.id), { disponible: '0.0001', minimo: '0.1250', precio: '7.0005' });
+  igual('las ediciones rechazadas no cambian version_fila', await versionDe(fino?.id, panaderiaId), versionEditada);
 
   // ---------- Stock bajo en el límite ----------
   await ejecucion.exigirBloqueo();
@@ -301,12 +327,17 @@ const main = async () => {
   await esperar('panadero de A consulta por id una materia prima de B -> 404', 404, 'GET', `/api/inventario/${ajena?.id}`);
   await esperar('panadero de A consulta por id una materia prima de B con ?panaderia_id=B -> 404', 404, 'GET',
     `/api/inventario/${ajena?.id}?panaderia_id=${panaderiaB}`);
+  // Se envía la version_fila vigente de B: el único motivo posible de rechazo es el aislamiento
+  const versionAjena = await versionDe(ajena?.id, panaderiaB);
+  igual('la materia prima de B tiene una version_fila válida (0)', versionAjena, 0);
   const edicionAjena = await esperar('panadero de A edita una materia prima de B indicando B -> 400', 400, 'PUT',
-    `/api/inventario/${ajena?.id}?panaderia_id=${panaderiaB}`, { precio_unitario: 9, panaderia_id: panaderiaB });
+    `/api/inventario/${ajena?.id}?panaderia_id=${panaderiaB}`, { precio_unitario: 9, panaderia_id: panaderiaB, version_fila: versionAjena });
   igual('edición ajena: mensaje de no encontrada', edicionAjena?.error, 'Materia prima no encontrada');
-  await esperar('panadero de A elimina una materia prima de B con ?panaderia_id=B -> 400', 400, 'DELETE',
-    `/api/inventario/${ajena?.id}?panaderia_id=${panaderiaB}`);
+  const eliminacionAjena = await esperar('panadero de A elimina una materia prima de B con ?panaderia_id=B -> 400', 400, 'DELETE',
+    `/api/inventario/${ajena?.id}?panaderia_id=${panaderiaB}`, { version_fila: versionAjena });
+  igual('eliminación ajena: mensaje de no encontrada', eliminacionAjena?.error, 'Materia prima no encontrada');
   igual('la materia prima de B no cambia y sigue activa', await enBaseB(ajena?.id), ajenaAntes);
+  igual('la version_fila de B no cambia', await versionDe(ajena?.id, panaderiaB), versionAjena);
   await esperar('panadero de B consulta por id una materia prima de A -> 404', 404, 'GET', `/api/inventario/${fino?.id}`, undefined, TOKEN_B);
 
   const listadoConB = (await pedir('GET', `/api/inventario?panaderia_id=${panaderiaB}`)).datos;
@@ -316,7 +347,8 @@ const main = async () => {
   const creadaConB = await esperar('crear indicando B en la query y en el cuerpo -> 201 en A', 201, 'POST', `/api/inventario?panaderia_id=${panaderiaB}`,
     insumo('ConB', { cantidad_disponible: 1, panaderia_id: panaderiaB }));
   igual('se crea en la panadería de la cuenta (A), no en B', [creadaConB?.panaderia_id, (await enBase(creadaConB?.id))?.disponible], [panaderiaId, '1.0000']);
-  const sinMover = await esperar('editar enviando solo panaderia_id de B -> 200 sin efecto', 200, 'PUT', `/api/inventario/${fino?.id}`, { panaderia_id: panaderiaB });
+  const sinMover = await esperar('editar enviando solo panaderia_id de B -> 200 sin efecto', 200, 'PUT', `/api/inventario/${fino?.id}`,
+    { panaderia_id: panaderiaB, version_fila: await versionDe(fino?.id, panaderiaId) });
   igual('la materia prima sigue en A con sus valores', [sinMover?.panaderia_id, await enBase(fino?.id)],
     [panaderiaId, { disponible: '0.0001', minimo: '0.1250', precio: '7.0005' }]);
 
