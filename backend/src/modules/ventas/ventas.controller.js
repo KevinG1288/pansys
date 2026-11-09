@@ -41,6 +41,17 @@ class VentasController {
       responderErrorDeDatos(res, error, ventasService.CAMPOS_PRODUCTO);
     }
   }
+
+  async actualizarProducto(req, res) {
+    try {
+      const producto = await ventasService.actualizarProducto(req.params.id, req.body, req.panaderiaId);
+      res.json(producto);
+    } catch (error) {
+      // 400 id o datos inválidos o campos no permitidos; 404 producto ajeno, inactivo o inexistente;
+      // 409 conflicto de concurrencia; cualquier error interno es un 500 sin detalles
+      responderErrorDeDatos(res, error, ventasService.CAMPOS_EDICION);
+    }
+  }
 }
 
 module.exports = new VentasController();

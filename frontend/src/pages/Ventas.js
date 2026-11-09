@@ -12,6 +12,7 @@ import StatCard from '../components/ui/StatCard';
 import FormularioProducto from '../components/ventas/FormularioProducto';
 import HistorialVentas from '../components/ventas/HistorialVentas';
 import PuntoVenta from '../components/ventas/PuntoVenta';
+import TablaProductos from '../components/ventas/TablaProductos';
 
 // La panadería no se envía: el backend usa siempre la de la cuenta autenticada
 // Se mantiene el contrato actual del POST; el backend ignora este valor y usa el usuario del token
@@ -30,6 +31,8 @@ const Ventas = () => {
   const [aviso, setAviso] = useState(null);
   const [mostrarPuntoVenta, setMostrarPuntoVenta] = useState(false);
   const [mostrarFormProducto, setMostrarFormProducto] = useState(false);
+  // Producto en edición (RF-13) o null
+  const [productoEditando, setProductoEditando] = useState(null);
 
   const cargarVentas = useCallback(async () => {
     setErrorVentas(null);
@@ -96,6 +99,28 @@ const Ventas = () => {
     await cargarProductos();
   };
 
+  // RF-13: solo nombre y precios (los campos que cambiaron). Si falla, el formulario muestra el error
+  // y sigue abierto; un 404 (producto dado de baja o ajeno) recarga la lista.
+  const editarProducto = async (datos) => {
+    const producto = productoEditando;
+    try {
+      const res = await api.put(`/api/ventas/productos/${producto.id}`, datos);
+      setProductoEditando(null);
+      setAviso({ tipo: 'exito', texto: `Producto «${res.data?.nombre ?? datos.nombre ?? producto.nombre}» actualizado.` });
+      // El historial muestra el nombre actual del producto: se recarga también
+      await Promise.allSettled([cargarProductos(), cargarVentas()]);
+    } catch (error) {
+      if (error?.response?.status === 404) cargarProductos();
+      throw error;
+    }
+  };
+
+  const abrirEdicion = (producto) => {
+    setAviso(null);
+    setMostrarFormProducto(false);
+    setProductoEditando(producto);
+  };
+
   const abrirPuntoVenta = () => {
     setAviso(null);
     setMostrarPuntoVenta(true);
@@ -103,6 +128,7 @@ const Ventas = () => {
 
   const abrirFormProducto = () => {
     setAviso(null);
+    setProductoEditando(null);
     setMostrarFormProducto(true);
   };
 
@@ -132,7 +158,7 @@ const Ventas = () => {
 
         {!escribe && (
           <Aviso tipo="info" id={ID_AVISO_CONSULTA}>
-            Modo consulta: tu rol permite ver las ventas, pero no registrar ventas ni crear productos.
+            Modo consulta: tu rol permite ver las ventas y los productos, pero no registrar ventas ni crear o editar productos.
           </Aviso>
         )}
 
@@ -163,6 +189,15 @@ const Ventas = () => {
           <FormularioProducto onGuardar={crearProducto} onCancelar={() => setMostrarFormProducto(false)} />
         )}
 
+        {productoEditando && (
+          <FormularioProducto
+            key={productoEditando.id}
+            producto={productoEditando}
+            onGuardar={editarProducto}
+            onCancelar={() => setProductoEditando(null)}
+          />
+        )}
+
         {mostrarPuntoVenta && (
           <PuntoVenta productos={productos} onRegistrar={registrarVenta} onCerrar={() => setMostrarPuntoVenta(false)} />
         )}
@@ -175,6 +210,10 @@ const Ventas = () => {
           <Aviso tipo="error" titulo="No se pudieron cargar las ventas">{errorVentas}</Aviso>
         ) : (
           <HistorialVentas ventas={ventas} />
+        )}
+
+        {!cargando && !errorProductos && (
+          <TablaProductos productos={productos} puedeEditar={escribe} descritoPor={descritoPor} onEditar={abrirEdicion} />
         )}
       </div>
     </div>

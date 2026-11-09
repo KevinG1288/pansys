@@ -2,10 +2,13 @@ const { Op } = require('sequelize');
 const { sequelize, Venta, DetalleVenta, Producto } = require('../../models/index');
 const { ErrorNegocio } = require('../../utils/errores');
 const { enTransaccion } = require('../../utils/transaccion');
-const { parsearId, parsearEntero } = require('../produccion/produccion.validaciones');
+const { parsearId, parsearEntero, exigirPanaderiaId } = require('../produccion/produccion.validaciones');
+const {
+  CAMPOS_CREACION, CAMPOS_EDICION, validarCreacionProducto, validarEdicionProducto
+} = require('./productos.validaciones');
 
 // Campos que el cliente puede enviar al crear un producto (panaderia_id y estado los fija el servidor)
-const CAMPOS_PRODUCTO = ['nombre', 'precio_compra', 'precio_venta', 'cantidad_disponible'];
+const CAMPOS_PRODUCTO = CAMPOS_CREACION;
 
 const MAX_PRODUCTOS_VENTA = 50;
 const MAX_CANTIDAD_LINEA = 100000;
@@ -107,13 +110,30 @@ class VentasService {
   }
 
   async crearProducto(datos, panaderiaId) {
-    // Sin cuerpo (petición sin JSON) no se envía ningún campo: el modelo responde qué falta
-    const campos = Object.fromEntries(
-      CAMPOS_PRODUCTO.filter(c => datos?.[c] !== undefined).map(c => [c, datos[c]])
-    );
+    // Valida nombre, precios y existencia inicial; un campo no permitido se rechaza (400)
+    const campos = validarCreacionProducto(datos);
     return await Producto.create({ ...campos, panaderia_id: panaderiaId });
+  }
+
+  // RF-13: edita nombre, precio de compra y/o precio de venta de un producto activo de la panadería
+  // de la sesión. Nunca toca cantidad_disponible, panaderia_id ni estado, y no borra productos.
+  // Las ventas anteriores no cambian: detalle_ventas guarda su propio precio_unitario y subtotal.
+  async actualizarProducto(id, datos, panaderiaId) {
+    const productoId = parsearId(id, 'id');
+    const campos = validarEdicionProducto(datos);
+    const where = { id: productoId, panaderia_id: exigirPanaderiaId(panaderiaId), estado: true };
+
+    return await enTransaccion(sequelize, async (t) => {
+      // Bloqueo de la fila: una venta simultánea lee el precio antes o después de la edición, nunca a medias
+      const producto = await Producto.findOne({ where, transaction: t, lock: t.LOCK.UPDATE });
+      // De otra panadería, inactivo o inexistente: 404 sin distinguir el motivo
+      if (!producto) throw new ErrorNegocio('Producto no encontrado', 404);
+      await producto.update(campos, { transaction: t, fields: Object.keys(campos) });
+      return producto;
+    });
   }
 }
 
 module.exports = new VentasService();
 module.exports.CAMPOS_PRODUCTO = CAMPOS_PRODUCTO;
+module.exports.CAMPOS_EDICION = CAMPOS_EDICION;

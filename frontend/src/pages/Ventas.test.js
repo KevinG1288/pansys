@@ -287,18 +287,161 @@ describe('Alta de producto', () => {
   });
 });
 
+describe('Gestión de productos (RF-13)', () => {
+  const tablaProductos = () => screen.getByRole('table', { name: 'Productos de la panadería' });
+  const abrirEdicion = (nombre) => userEvent.click(screen.getByRole('button', { name: `Editar ${nombre}` }));
+
+  test('lista los productos con precios y existencias, y permite buscarlos', async () => {
+    await renderizar();
+
+    const fila = within(tablaProductos()).getByRole('row', { name: /Torta/ });
+    expect(within(fila).getByText(/\$\s?2\.000/)).toBeInTheDocument();
+    expect(within(tablaProductos()).getByRole('row', { name: /Galleta/ })).toHaveTextContent('Sin existencias');
+    expect(screen.getByText('3 de 3 productos')).toBeInTheDocument();
+
+    userEvent.type(screen.getByLabelText('Buscar producto por nombre'), 'tor');
+    expect(screen.getByText('1 de 3 productos')).toBeInTheDocument();
+    expect(within(tablaProductos()).queryByRole('row', { name: /Galleta/ })).not.toBeInTheDocument();
+  });
+
+  test('edita solo los campos modificados, sin existencias, y recarga productos e historial', async () => {
+    api.put.mockResolvedValueOnce({ data: { ...PRODUCTOS[0], precio_venta: 700 } });
+    await renderizar();
+
+    abrirEdicion('Pan');
+    expect(screen.getByRole('dialog', { name: 'Editar producto' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Nombre')).toHaveValue('Pan');
+    expect(screen.getByLabelText('Precio de venta (COP)')).toHaveValue('500');
+    expect(screen.queryByLabelText('Cantidad disponible')).not.toBeInTheDocument();
+    expect(screen.getByText('3 unidades')).toBeInTheDocument();
+
+    userEvent.clear(screen.getByLabelText('Precio de venta (COP)'));
+    userEvent.type(screen.getByLabelText('Precio de venta (COP)'), '700');
+    userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+
+    expect(await screen.findByText('Producto «Pan» actualizado.')).toBeInTheDocument();
+    expect(api.put).toHaveBeenCalledTimes(1);
+    expect(api.put).toHaveBeenCalledWith('/api/ventas/productos/1', { precio_venta: 700 });
+    await waitFor(() => expect(llamadasA(URL_PRODUCTOS)).toBe(2));
+    expect(llamadasA(URL_VENTAS)).toBe(2);
+    expect(screen.queryByRole('dialog', { name: 'Editar producto' })).not.toBeInTheDocument();
+  });
+
+  test('el historial conserva el precio con que se vendió tras editar el producto', async () => {
+    api.put.mockResolvedValueOnce({ data: { ...PRODUCTOS[0], nombre: 'Pan rollo', precio_venta: 900 } });
+    await renderizar();
+
+    abrirEdicion('Pan');
+    userEvent.clear(screen.getByLabelText('Nombre'));
+    userEvent.type(screen.getByLabelText('Nombre'), '  Pan rollo ');
+    userEvent.clear(screen.getByLabelText('Precio de venta (COP)'));
+    userEvent.type(screen.getByLabelText('Precio de venta (COP)'), '900');
+    // Respuesta real tras la edición: el producto cambia, el detalle de la venta conserva su precio
+    const editado = { ...PRODUCTOS[0], nombre: 'Pan rollo', precio_venta: 900 };
+    simularGet({
+      productos: [editado, PRODUCTOS[1], PRODUCTOS[2]],
+      ventas: VENTAS.map(v => ({ ...v, DetalleVenta: v.DetalleVenta.map(l => (l.producto_id === 1 ? { ...l, Producto: editado } : l)) }))
+    });
+    userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+
+    expect(await screen.findByText('Producto «Pan rollo» actualizado.')).toBeInTheDocument();
+    expect(api.put).toHaveBeenCalledWith('/api/ventas/productos/1', { nombre: 'Pan rollo', precio_venta: 900 });
+    await waitFor(() => expect(llamadasA(URL_VENTAS)).toBe(2));
+    userEvent.click(screen.getByRole('button', { name: 'Ver detalle de la venta #10' }));
+    const detalle = screen.getByRole('list', { name: 'Productos de la venta #10' });
+    expect(within(detalle).getByText(/Pan rollo × 3/)).toBeInTheDocument();
+    expect(within(detalle).getByText(/\$\s?500 c\/u/)).toBeInTheDocument();
+    expect(within(detalle).getByText(/\$\s?1\.500/)).toBeInTheDocument();
+  });
+
+  test('valida nombre y precios antes de enviar', async () => {
+    await renderizar();
+
+    abrirEdicion('Torta');
+    userEvent.clear(screen.getByLabelText('Nombre'));
+    userEvent.clear(screen.getByLabelText('Precio de venta (COP)'));
+    userEvent.type(screen.getByLabelText('Precio de venta (COP)'), '-5');
+    userEvent.clear(screen.getByLabelText('Precio de compra (COP)'));
+    userEvent.type(screen.getByLabelText('Precio de compra (COP)'), '10.555');
+    userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+
+    expect(api.put).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Nombre')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Precio de venta (COP)')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Precio de compra (COP)')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getAllByText('Debe ser un número mayor o igual a 0 con máximo 2 decimales')).toHaveLength(2);
+  });
+
+  test('sin cambios no envía nada y lo indica', async () => {
+    await renderizar();
+
+    abrirEdicion('Pan');
+    userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+
+    expect(await screen.findByText('No hay cambios para guardar.')).toBeInTheDocument();
+    expect(api.put).not.toHaveBeenCalled();
+  });
+
+  test('un error del backend se muestra y el formulario sigue abierto', async () => {
+    api.put.mockRejectedValueOnce({ response: { status: 400, data: { error: 'Campos requeridos o inválidos: precio_venta' } } });
+    await renderizar();
+
+    abrirEdicion('Pan');
+    userEvent.clear(screen.getByLabelText('Precio de venta (COP)'));
+    userEvent.type(screen.getByLabelText('Precio de venta (COP)'), '650');
+    userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+
+    expect(await screen.findByText('Campos requeridos o inválidos: precio_venta')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Editar producto' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeEnabled();
+    expect(llamadasA(URL_PRODUCTOS)).toBe(1);
+  });
+
+  test('un 404 (producto dado de baja o ajeno) muestra el error y recarga los productos', async () => {
+    api.put.mockRejectedValueOnce({ response: { status: 404, data: { error: 'Producto no encontrado' } } });
+    await renderizar();
+
+    abrirEdicion('Pan');
+    userEvent.clear(screen.getByLabelText('Precio de venta (COP)'));
+    userEvent.type(screen.getByLabelText('Precio de venta (COP)'), '650');
+    userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+
+    expect(await screen.findByText('Producto no encontrado')).toBeInTheDocument();
+    await waitFor(() => expect(llamadasA(URL_PRODUCTOS)).toBe(2));
+  });
+
+  test('el punto de venta sigue funcionando después de editar', async () => {
+    api.put.mockResolvedValueOnce({ data: { ...PRODUCTOS[0], precio_venta: 700 } });
+    await renderizar();
+
+    abrirEdicion('Pan');
+    userEvent.clear(screen.getByLabelText('Precio de venta (COP)'));
+    userEvent.type(screen.getByLabelText('Precio de venta (COP)'), '700');
+    simularGet({ productos: [{ ...PRODUCTOS[0], precio_venta: 700 }, PRODUCTOS[1], PRODUCTOS[2]] });
+    userEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+    await screen.findByText('Producto «Pan» actualizado.');
+    await waitFor(() => expect(llamadasA(URL_PRODUCTOS)).toBe(2));
+
+    abrirPuntoVenta();
+    anadir('Pan');
+    expect(within(carrito()).getByLabelText('Total de la venta')).toHaveTextContent(/\$\s?700/);
+  });
+});
+
 describe('Permisos del gerente (solo lectura)', () => {
-  test('ve indicadores e historial, pero no puede registrar ventas ni crear productos', async () => {
+  test('ve indicadores, historial y productos, pero no puede registrar ventas ni crear o editar productos', async () => {
     await renderizar(GERENTE);
 
     const explicacion = screen.getByRole('status');
-    expect(explicacion).toHaveTextContent('Modo consulta: tu rol permite ver las ventas, pero no registrar ventas ni crear productos.');
-    ['Nueva venta', 'Nuevo producto'].forEach(nombre => {
+    expect(explicacion).toHaveTextContent('Modo consulta: tu rol permite ver las ventas y los productos, pero no registrar ventas ni crear o editar productos.');
+    ['Nueva venta', 'Nuevo producto', 'Editar Pan', 'Editar Torta', 'Editar Galleta'].forEach(nombre => {
       const boton = screen.getByRole('button', { name: nombre });
       expect(boton).toBeDisabled();
       expect(boton).toHaveAttribute('aria-describedby', 'aviso-modo-consulta-ventas');
     });
     expect(screen.getByRole('row', { name: /#10/ })).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Productos de la panadería' })).toBeInTheDocument();
     expect(api.post).not.toHaveBeenCalled();
+    expect(api.put).not.toHaveBeenCalled();
   });
 });

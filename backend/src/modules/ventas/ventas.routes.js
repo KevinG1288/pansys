@@ -12,5 +12,7 @@ router.get('/', ...lectura, ventasController.getAll);
 router.post('/', ...escritura, ventasController.crear);
 router.get('/productos', ...lectura, ventasController.getProductos);
 router.post('/productos', ...escritura, ventasController.crearProducto);
+// RF-13: editar nombre y precios (sin existencias). No hay ruta DELETE: los productos no se borran
+router.put('/productos/:id', ...escritura, ventasController.actualizarProducto);
 
 module.exports = router;

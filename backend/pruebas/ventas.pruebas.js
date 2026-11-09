@@ -311,6 +311,90 @@ const main = async () => {
   igual('500 sin detalles internos', fallo?.error, 'Error interno del servidor');
   igual('rollback: stock y ventas intactos', [await stock(pan?.id), await contarVentas()], [6, ventasT]);
 
+  // ---------- Edición de productos (RF-13) ----------
+  // Solo nombre y precios; nunca existencias, panadería ni estado. Las ventas anteriores conservan
+  // su precio y su importe; las posteriores usan el precio nuevo. Todo en las panaderías temporales.
+  await ejecucion.exigirBloqueo();
+  console.log('\n== Edición de productos (RF-13)');
+  const leerProducto = async (id) => (await sequelize.query(
+    `SELECT nombre, precio_compra, precio_venta, cantidad_disponible, panaderia_id, estado
+     FROM pansys_test.productos WHERE id = ? AND panaderia_id IN (?)`, { replacements: [id ?? 0, propias()] }))[0][0] ?? null;
+  const leerVenta = async (id) => {
+    const [[cabecera]] = await sequelize.query(
+      'SELECT total, panaderia_id FROM pansys_test.ventas WHERE id = ? AND panaderia_id IN (?)', { replacements: [id ?? 0, propias()] });
+    const [lineas] = await sequelize.query(
+      `SELECT d.producto_id, d.cantidad, d.precio_unitario, d.subtotal FROM pansys_test.detalle_ventas d
+       JOIN pansys_test.ventas v ON v.id = d.venta_id WHERE d.venta_id = ? AND v.panaderia_id IN (?) ORDER BY d.producto_id`,
+      { replacements: [id ?? 0, propias()] });
+    return { total: cabecera?.total ?? null, lineas: lineas.map(l => [l.producto_id, l.cantidad, l.precio_unitario, l.subtotal]) };
+  };
+  const ventaAnterior = await leerVenta(venta?.id);
+  igual('referencia: la primera venta (3 panes a 500 y 1 torta a 2000) antes de editar',
+    ventaAnterior, { total: 3500, lineas: [[pan?.id, 3, 500, 1500], [torta?.id, 1, 2000, 2000]] });
+  const panAntes = await leerProducto(pan?.id);
+  igual('referencia: pan antes de editar', [panAntes?.precio_venta, panAntes?.cantidad_disponible, panAntes?.estado], [500, 6, 1]);
+  const panBAntes = await leerProducto(panB?.id);
+  const inactivoAntes = await leerProducto(inactivoId);
+
+  // Permisos y edición válida
+  const editadoPanadero = await esperar('panadero de A edita el precio de venta del pan -> 200', 200, 'PUT', `/api/ventas/productos/${pan?.id}`, 'panaderoa',
+    { precio_venta: 650 });
+  igual('respuesta: precio nuevo, existencias y panadería sin cambios',
+    [editadoPanadero?.precio_venta, editadoPanadero?.cantidad_disponible, editadoPanadero?.panaderia_id], [650, 6, panaderiaA]);
+  const nombreEditado = nombre('Pan editado');
+  await esperar('administradora de A edita nombre y precio de compra del pan -> 200', 200, 'PUT', `/api/ventas/productos/${pan?.id}`, 'admin',
+    { nombre: `  ${nombreEditado} `, precio_compra: 120 });
+  igual('base: nombre recortado y precios nuevos; existencias, panadería y estado intactos',
+    await leerProducto(pan?.id), { nombre: nombreEditado, precio_compra: 120, precio_venta: 650, cantidad_disponible: 6, panaderia_id: panaderiaA, estado: 1 });
+  const panEditado = await leerProducto(pan?.id);
+  await esperar('gerente de A intenta editar -> 403', 403, 'PUT', `/api/ventas/productos/${pan?.id}`, 'gerentea', { precio_venta: 1 });
+  igual('el rechazo del gerente no cambia el pan', await leerProducto(pan?.id), panEditado);
+
+  // Aislamiento entre panaderías
+  await esperar('panadero de B edita un producto de A -> 404', 404, 'PUT', `/api/ventas/productos/${pan?.id}`, 'panaderob', { precio_venta: 1 });
+  await esperar('panadero de A edita un producto de B -> 404', 404, 'PUT', `/api/ventas/productos/${panB?.id}`, 'panaderoa', { precio_venta: 1 });
+  await esperar('administradora de A edita un producto de B -> 404', 404, 'PUT', `/api/ventas/productos/${panB?.id}`, 'admin', { precio_venta: 1 });
+  await esperar('producto inactivo -> 404', 404, 'PUT', `/api/ventas/productos/${inactivoId}`, 'panaderoa', { precio_venta: 1 });
+  await esperar('producto inexistente -> 404', 404, 'PUT', '/api/ventas/productos/2147483647', 'panaderoa', { precio_venta: 1 });
+  igual('aislamiento: pan de A, pan de B y el inactivo sin cambios',
+    [await leerProducto(pan?.id), await leerProducto(panB?.id), await leerProducto(inactivoId)], [panEditado, panBAntes, inactivoAntes]);
+
+  // Campos prohibidos y valores inválidos
+  for (const [descripcion, cuerpo] of [
+    ['cantidad_disponible', { precio_venta: 700, cantidad_disponible: 999 }],
+    ['panaderia_id de B', { precio_venta: 700, panaderia_id: panaderiaB }],
+    ['estado', { estado: false }],
+    ['id', { id: panB?.id, precio_venta: 700 }],
+    ['precio negativo', { precio_venta: -1 }],
+    ['precio no numérico', { precio_venta: 'abc' }],
+    ['precio en notación exponencial', { precio_venta: '1e3' }],
+    ['precio con tres decimales', { precio_compra: 1.234 }],
+    ['precio booleano', { precio_venta: true }],
+    ['nombre vacío', { nombre: '   ' }],
+    ['cuerpo vacío', {}]
+  ]) {
+    await esperar(`editar con ${descripcion} -> 400`, 400, 'PUT', `/api/ventas/productos/${pan?.id}`, 'panaderoa', cuerpo);
+  }
+  await esperar('editar con id no numérico -> 400', 400, 'PUT', '/api/ventas/productos/abc', 'panaderoa', { precio_venta: 1 });
+  igual('los rechazos no cambian el pan (existencias en 6)', await leerProducto(pan?.id), panEditado);
+  // Alta con campos no permitidos o precio inválido: se rechaza sin crear nada
+  const ventasAntesAlta = await contarVentas();
+  await esperar('crear producto con panaderia_id -> 400', 400, 'POST', '/api/ventas/productos', 'panaderoa',
+    { nombre: nombre('Rechazado A'), precio_venta: 500, panaderia_id: panaderiaB });
+  await esperar('crear producto con precio negativo -> 400', 400, 'POST', '/api/ventas/productos', 'panaderoa',
+    { nombre: nombre('Rechazado B'), precio_venta: -5 });
+  const [[rechazados]] = await sequelize.query(
+    'SELECT COUNT(*) AS n FROM pansys_test.productos WHERE nombre IN (?)', { replacements: [[ejecucion.nombre('Rechazado A'), ejecucion.nombre('Rechazado B')]] });
+  igual('ningún producto rechazado quedó creado (en ninguna panadería)', [Number(rechazados.n), await contarVentas()], [0, ventasAntesAlta]);
+
+  // Ventas anteriores intactas y ventas posteriores con el precio nuevo
+  igual('la venta anterior conserva precio unitario, subtotales y total', await leerVenta(venta?.id), ventaAnterior);
+  const ventaPosterior = await esperar('venta de 2 panes después de editar -> 201', 201, 'POST', '/api/ventas', 'panaderoa',
+    { productos: [{ producto_id: pan?.id, cantidad: 2 }] });
+  igual('la venta posterior usa el precio nuevo (2 x 650)', await leerVenta(ventaPosterior?.id), { total: 1300, lineas: [[pan?.id, 2, 650, 1300]] });
+  igual('la venta posterior descuenta las existencias (pan queda en 4)', await stock(pan?.id), 4);
+  igual('la venta anterior sigue intacta tras la venta posterior', await leerVenta(venta?.id), ventaAnterior);
+
   // ---------- Invariantes (solo en las panaderías temporales) ----------
   await ejecucion.exigirBloqueo();
   console.log('\n== Invariantes');

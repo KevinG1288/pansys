@@ -212,12 +212,20 @@ const main = async () => {
     igual('GET /api/ventas/productos -> 200 con los productos', [r.codigo, r.cuerpo, eventos], [200, PRODUCTOS, ['listarProductos:20']]);
     preparar();
     r = await llamar(ventasController.crearProducto, {
-      body: { nombre: 'Torta', precio_compra: 400, precio_venta: 900, cantidad_disponible: 3, panaderia_id: 99, estado: false, extra: 'x' }
+      body: { nombre: 'Torta', precio_compra: 400, precio_venta: 900, cantidad_disponible: 3 }
     });
     igual('POST /api/ventas/productos -> 201 con el producto creado',
       [r.codigo, r.cuerpo], [201, { id: 41, nombre: 'Torta', precio_compra: 400, precio_venta: 900, cantidad_disponible: 3, panaderia_id: 20 }]);
-    igual('crear producto: solo los campos del cliente; panadería y estado los fija el servidor',
+    igual('crear producto: solo los campos del cliente; la panadería la fija el servidor',
       creado, { nombre: 'Torta', precio_compra: 400, precio_venta: 900, cantidad_disponible: 3, panaderia_id: 20 });
+    // RF-13: panaderia_id, estado o cualquier otro campo ya no se ignoran en silencio: se rechazan sin escribir
+    preparar();
+    r = await llamar(ventasController.crearProducto, {
+      body: { nombre: 'Torta', precio_venta: 900, panaderia_id: 99, estado: false, extra: 'x' }
+    });
+    igual('crear producto con panaderia_id, estado o campos desconocidos -> 400 que los nombra, sin escribir',
+      [r.codigo, r.cuerpo, eventos.includes('crearProducto')],
+      [400, { error: 'Campos no permitidos: panaderia_id, estado, extra' }, false]);
     preparar();
     r = await llamar(inventarioController.getAll, {});
     igual('GET /api/inventario -> 200 con las materias primas activas', [r.codigo, r.cuerpo, eventos], [200, MATERIAS, ['listarMaterias:20']]);
@@ -455,7 +463,7 @@ const main = async () => {
     igual('roles.middleware.js no devuelve error.message, no lee la query ni el cuerpo y no consulta modelos',
       [/error\.message/.test(middlewareCodigo), /req\.(query|body)/.test(middlewareCodigo), /require\(/.test(middlewareCodigo)], [false, false, false]);
     for (const [archivo, usos] of [
-      ['../src/modules/ventas/ventas.controller.js', 4],
+      ['../src/modules/ventas/ventas.controller.js', 5],
       ['../src/modules/inventario/inventario.controller.js', 6]
     ]) {
       const codigo = leer(archivo);
