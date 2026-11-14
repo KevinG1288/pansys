@@ -8,29 +8,52 @@ const { enTransaccion } = require('../../utils/transaccion');
 const { firmarSesion } = require('../../utils/sesion');
 // Enlaces de restablecimiento (SQL 005): se invocan por el objeto para poder sustituirlos en pruebas
 const restablecimientos = require('./restablecimiento.repositorio');
+const { crearLimitesLogin } = require('./login.limites');
+
+// Límites de intentos fallidos del proceso (B1). Se pueden sustituir en pruebas con { limites }.
+const limitesLogin = crearLimitesLogin();
+const MENSAJE_LIMITE = 'Demasiados intentos de inicio de sesión. Inténtelo de nuevo más tarde.';
 
 class AuthService {
 
-  async login(email, contrasena) {
-    // Buscar usuario por email
-    const usuario = await Usuario.findOne({
-      where: { email, estado: true },
-      include: [{ model: Rol }]
-    });
-
-    // Mismo mensaje para email o contraseña incorrectos (no revelar qué cuentas existen)
-    if (!usuario) {
-      throw new ErrorNegocio('Credenciales inválidas', 401);
+  // ip: dirección del cliente (req.ip con 'trust proxy' = 'loopback'). Solo se usa como clave del
+  // limitador en memoria; nunca se guarda ni se registra.
+  async login(email, contrasena, { ip, limites = limitesLogin } = {}) {
+    // Antes de tocar la base: si la IP o la cuenta agotaron sus intentos, 429 con mensaje genérico
+    // (igual exista o no la cuenta). Este rechazo no se anota: no alarga el bloqueo.
+    const reserva = limites.reservar({ ip, email: typeof email === 'string' ? email.trim() : '' });
+    if (!reserva.permitido) {
+      const error = new ErrorNegocio(MENSAJE_LIMITE, 429);
+      error.retryAfterS = reserva.retryAfterS;
+      throw error;
     }
+    let credencialesInvalidas = false;
+    try {
+      // Buscar usuario por email
+      const usuario = await Usuario.findOne({
+        where: { email, estado: true },
+        include: [{ model: Rol }]
+      });
 
-    // Verificar contraseña
-    const valido = await bcrypt.compare(contrasena, usuario.contrasena);
-    if (!valido) {
-      throw new ErrorNegocio('Credenciales inválidas', 401);
+      // Mismo mensaje para email o contraseña incorrectos (no revelar qué cuentas existen)
+      if (!usuario) {
+        credencialesInvalidas = true;
+        throw new ErrorNegocio('Credenciales inválidas', 401);
+      }
+
+      // Verificar contraseña
+      const valido = await bcrypt.compare(contrasena, usuario.contrasena);
+      if (!valido) {
+        credencialesInvalidas = true;
+        throw new ErrorNegocio('Credenciales inválidas', 401);
+      }
+
+      // Mismo contrato de siempre: { token, usuario }. El token lleva además la versión de sesión.
+      return firmarSesion(usuario, usuario.Rol.nombre);
+    } finally {
+      // Siempre se libera la reserva; solo un fallo de credenciales cuenta para el límite
+      reserva.liberar(credencialesInvalidas);
     }
-
-    // Mismo contrato de siempre: { token, usuario }. El token lleva además la versión de sesión.
-    return firmarSesion(usuario, usuario.Rol.nombre);
   }
 
   // Alta de cuentas por el administrador de una panadería: solo panaderos y gerentes, y siempre

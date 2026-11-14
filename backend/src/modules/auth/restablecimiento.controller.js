@@ -25,7 +25,8 @@ const responder = (res, error) => {
 };
 
 // La IP solo se usa como clave de los limitadores en memoria: nunca se guarda en la base ni se
-// registra. req.ip es la dirección de la conexión (Express sin trust proxy).
+// registra. req.ip es la dirección del cliente según 'trust proxy' = 'loopback' (src/app.js): la
+// conexión, o la que añade un proxy que se ejecuta en el mismo equipo (Caddy).
 const crearControlador = (servicio) => {
   const manejar = (operacion, datos) => async (req, res) => {
     try {

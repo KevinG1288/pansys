@@ -22,6 +22,8 @@ const esConflictoConcurrencia = (error) =>
 // Traduce cualquier error a una respuesta HTTP sin exponer detalles internos
 const responderError = (res, error) => {
   if (error instanceof ErrorNegocio) {
+    // Límite de intentos: indica cuándo reintentar (como ya hace el restablecimiento de contraseña)
+    if (error.status === 429 && Number.isInteger(error.retryAfterS)) res.set('Retry-After', String(error.retryAfterS));
     return res.status(error.status).json({ error: error.message, ...error.detalle });
   }
 

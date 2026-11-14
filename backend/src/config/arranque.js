@@ -36,10 +36,30 @@ const leerOpciones = (env = process.env, estadoEntorno = require('./entorno')) =
   entornoCargado: estadoEntorno.cargado
 });
 
+// JWT_SECRET en producción (I2). Se rechaza ausente, con espacios en los extremos, corto, igual a un
+// valor de ejemplo o evidentemente débil (pocos caracteres distintos o un fragmento de ejemplo).
+// El mensaje nunca incluye el valor. El secreto definitivo debe generarse con un generador
+// criptográficamente seguro, por ejemplo:
+//   node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+const LONGITUD_MINIMA_JWT = 32;
+const CARACTERES_DISTINTOS_MINIMOS_JWT = 12;
+const SECRETOS_DE_EJEMPLO = ['genera_una_cadena_larga_y_aleatoria'];
+const FRAGMENTOS_DE_EJEMPLO = ['genera_una', 'cambia_est', 'changeme', 'change_me', 'your_secret', 'tu_secreto', 'secreto_jwt', 'jwt_secret', 'ejemplo', 'example', 'password', 'contrasena'];
+const motivoSecretoJwtDebil = (valor) => {
+  if (typeof valor !== 'string' || valor === '') return 'falta JWT_SECRET';
+  if (valor.trim() !== valor) return 'JWT_SECRET tiene espacios al principio o al final';
+  if (valor.length < LONGITUD_MINIMA_JWT) return `JWT_SECRET debe tener al menos ${LONGITUD_MINIMA_JWT} caracteres`;
+  const minusculas = valor.toLowerCase();
+  if (SECRETOS_DE_EJEMPLO.includes(valor) || FRAGMENTOS_DE_EJEMPLO.some(f => minusculas.includes(f))) return 'JWT_SECRET es un valor de ejemplo';
+  if (new Set(valor).size < CARACTERES_DISTINTOS_MINIMOS_JWT) return 'JWT_SECRET es demasiado repetitivo';
+  return null;
+};
+
 // Antes de conectar (primer paso de iniciarServidor):
 //  1. Producción: la base de producción exige, A LA VEZ, --entorno=produccion (solo por argumento),
 //     NODE_ENV=production y PANSYS_AUTORIZAR_BASE_PRODUCCION=pansys_db, y nunca el modo demo. Una
-//     combinación parcial o incoherente detiene el arranque.
+//     combinación parcial o incoherente detiene el arranque. Con --entorno=produccion, además, un
+//     JWT_SECRET ausente o débil detiene el arranque (motivoSecretoJwtDebil).
 //  2. Correo: una configuración inválida o no autorizada (p. ej. SMTP real fuera de producción sin
 //     PANSYS_PERMITIR_SMTP_REAL=1 y destinos) detiene el arranque. El mensaje solo usa los textos de
 //     correo.js, que nunca incluyen valores; cualquier otro error se resume sin detalles.
@@ -51,6 +71,8 @@ const validarConfiguracion = (env, opciones) => {
     if (!opciones.entornoCargado) throw new ErrorArranque('--entorno=produccion: no se pudo leer backend/.env.produccion. El servidor no arranca.');
     if (env.NODE_ENV !== 'production') throw new ErrorArranque('--entorno=produccion exige NODE_ENV=production. El servidor no arranca.');
     if (opciones.modoDemo) throw new ErrorArranque('El modo demo no se admite con --entorno=produccion. El servidor no arranca.');
+    const motivoJwt = motivoSecretoJwtDebil(env.JWT_SECRET);
+    if (motivoJwt) throw new ErrorArranque(`Producción: ${motivoJwt}. Genérelo con un generador criptográficamente seguro (ver .env.example). El servidor no arranca.`);
   } else if (env.NODE_ENV === 'production') {
     throw new ErrorArranque('NODE_ENV=production solo se admite con --entorno=produccion (npm run start:produccion). El servidor no arranca.');
   }
@@ -113,13 +135,18 @@ const montarFrontend = (app, dir) => {
   });
 };
 
-// Orden del arranque: configuración -> build -> conexión -> base real -> aceptar peticiones.
-// Si cualquier paso falla, no se llama a listen().
-const iniciarServidor = async ({ app, sequelize, env = process.env, opciones = leerOpciones(env) }) => {
+// Orden del arranque: configuración -> build -> conexión -> base real -> respuestas finales ->
+// aceptar peticiones. Si cualquier paso falla, no se llama a listen().
+// montarFinales(app): monta lo que debe ir DESPUÉS de todas las rutas (404 de /api y manejador
+// final de errores). Se hace aquí, justo antes de listen(), y no al cargar app.js, para que las
+// rutas que se añadan después de cargarlo (p. ej. la ruta de identidad de las suites de
+// integración) queden por delante y no las tape el 404.
+const iniciarServidor = async ({ app, sequelize, env = process.env, opciones = leerOpciones(env), montarFinales }) => {
   validarConfiguracion(env, opciones);
   comprobarBuild(opciones);
   await sequelize.authenticate();
   await verificarBaseConectada(sequelize, opciones);
+  if (typeof montarFinales === 'function') montarFinales(app);
   return new Promise((resolve, reject) => {
     const servidor = app.listen(env.PORT, () => resolve(servidor));
     servidor.on('error', reject);
@@ -127,6 +154,6 @@ const iniciarServidor = async ({ app, sequelize, env = process.env, opciones = l
 };
 
 module.exports = {
-  BASE_DEMO, BASE_PRODUCCION, ErrorArranque, leerOpciones, validarConfiguracion, comprobarBuild,
+  BASE_DEMO, BASE_PRODUCCION, ErrorArranque, leerOpciones, validarConfiguracion, motivoSecretoJwtDebil, comprobarBuild,
   verificarBaseConectada, montarFrontend, iniciarServidor
 };
