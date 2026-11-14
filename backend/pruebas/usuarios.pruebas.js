@@ -749,6 +749,61 @@ const main = async () => {
   const listado = (await pedir('GET', '/api/usuarios', 'admin')).datos ?? [];
   igual('GET /api/usuarios no expone version_sesion', listado.some(c => 'version_sesion' in c), false);
 
+  // ---------- Seguridad previa a la publicación (B1, B2, I1, I3) ----------
+  // Sin datos de demostración: una cuenta temporal propia (registrada para la limpieza) y correos
+  // marcados con el runId que no existen. Las IP son de documentación (RFC 5737, 203.0.113.0/24) y
+  // llegan en X-Forwarded-For desde el bucle local, como lo haría Caddy (trust proxy = 'loopback').
+  // Cada suite arranca su propia aplicación: estos límites en memoria no afectan a otras suites.
+  await ejecucion.exigirBloqueo();
+  console.log('\n== Seguridad: límites de inicio de sesión, proxy local y respuestas finales');
+  // Petición con cabeceras y cuerpo en bruto (JSON mal formado); sin token
+  const pedirCrudo = async (metodo, ruta, { cabeceras = {}, cuerpo } = {}) => {
+    if (!URL) throw new Error('No se envían peticiones: la identidad del servidor no está confirmada');
+    const r = await fetch(URL + ruta, { method: metodo, headers: { 'Content-Type': 'application/json', ...cabeceras }, body: cuerpo });
+    let datos = null;
+    try { datos = await r.json(); } catch { /* sin cuerpo JSON */ }
+    if (!sinSecretos(datos)) respuestasConSecretos++;
+    return { status: r.status, datos, retryAfter: r.headers.get('retry-after'), poweredBy: r.headers.get('x-powered-by'), tipo: r.headers.get('content-type') };
+  };
+  const loginDesde = (ip, email, contrasena) => pedirCrudo('POST', '/api/auth/login',
+    { cabeceras: { 'X-Forwarded-For': ip }, cuerpo: JSON.stringify({ email, contrasena }) });
+  const MENSAJE_LIMITE = 'Demasiados intentos de inicio de sesión. Inténtelo de nuevo más tarde.';
+  const es429 = (r) => r.status === 429 && r.datos?.error === MENSAJE_LIMITE && Number(r.retryAfter) >= 1 && Number(r.retryAfter) <= 900;
+
+  // B1 por cuenta: 5 fallos de una cuenta real -> el 6.º intento es 429, incluso con la contraseña correcta
+  const correoLimite = ejecucion.correo('limite');
+  await crearCuentaApi('limite', 'Limite1234', 2, panaderiaA); // panadero, como las demás cuentas de la suite
+  const malas = [];
+  for (let i = 0; i < 5; i++) malas.push((await loginDesde('203.0.113.20', correoLimite, 'Incorrecta1')).status);
+  igual('5 contraseñas incorrectas de una cuenta -> 401 cada una', malas, [401, 401, 401, 401, 401]);
+  const conCorrecta = await loginDesde('203.0.113.21', correoLimite, 'Limite1234');
+  registrar(es429(conCorrecta), 'tras 5 fallos: 429 genérico con Retry-After, incluso con la contraseña correcta y desde otra IP',
+    `HTTP ${conCorrecta.status}: ${JSON.stringify(conCorrecta.datos)} Retry-After=${conCorrecta.retryAfter}`);
+
+  // B1 por IP + B2: 10 fallos desde una IP (cuentas inexistentes) -> esa IP queda bloqueada; otra no
+  const ipBloqueada = '203.0.113.5';
+  const fallosIp = [];
+  for (let i = 0; i < 10; i++) fallosIp.push((await loginDesde(ipBloqueada, ejecucion.correo(`noexiste${i}`), 'Clave1234')).status);
+  igual('10 fallos desde una IP con cuentas inexistentes -> 401 (mismo mensaje que una cuenta real)', fallosIp, Array(10).fill(401));
+  const ipAgotada = await loginDesde(ipBloqueada, ejecucion.correo('noexiste10'), 'Clave1234');
+  registrar(es429(ipAgotada), 'la IP agotada recibe 429 aunque la cuenta sea nueva', `HTTP ${ipAgotada.status}: ${JSON.stringify(ipAgotada.datos)}`);
+  const otraIp = await loginDesde('203.0.113.6', ejecucion.correo('noexiste11'), 'Clave1234');
+  igual('otra IP (otro cliente detrás del proxy) no se ve afectada -> 401', otraIp.status, 401);
+  // B2: con una cadena, cuenta la dirección que añade el proxy local (la de la derecha), no la que
+  // escribió el cliente a la izquierda
+  const cadena = await loginDesde(`${ipBloqueada}, 203.0.113.7`, ejecucion.correo('noexiste12'), 'Clave1234');
+  igual('X-Forwarded-For con cadena: se usa la dirección añadida por el proxy (no la bloqueada que escribe el cliente)', cadena.status, 401);
+  igual('ninguno de estos intentos creó cuentas', await contarCorreos([...Array(13).keys()].map(i => ejecucion.correo(`noexiste${i}`))), 0);
+
+  // I1 + I3: respuestas finales en JSON y sin X-Powered-By
+  const malFormado = await pedirCrudo('POST', '/api/auth/login', { cuerpo: '{"email":' });
+  igual('JSON mal formado -> 400 en JSON', [malFormado.status, malFormado.tipo?.startsWith('application/json'), malFormado.datos],
+    [400, true, { error: 'El cuerpo de la petición no es un JSON válido' }]);
+  const inexistente = await pedirCrudo('GET', '/api/no-existe');
+  igual('/api inexistente -> 404 en JSON', [inexistente.status, inexistente.datos], [404, { error: 'Ruta no encontrada' }]);
+  igual('ninguna de estas respuestas lleva X-Powered-By', [malas.length, conCorrecta.poweredBy, ipAgotada.poweredBy, malFormado.poweredBy, inexistente.poweredBy],
+    [5, null, null, null, null]);
+
   // ---------- Contratos existentes ----------
   await ejecucion.exigirBloqueo();
   console.log('\n== Contratos existentes');
