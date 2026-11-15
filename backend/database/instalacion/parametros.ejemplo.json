@@ -1,0 +1,51 @@
+{
+  "identidad": {
+    "puerto": 3306,
+    "server_uuid": "CAMBIAR por @@server_uuid del servidor esperado",
+    "datadir": "CAMBIAR por @@datadir exacto del servidor esperado"
+  },
+  "conexion": {
+    "host": "127.0.0.1",
+    "base": "nombre_base_cambiar"
+  },
+  "administrador_mysql": "root",
+  "cuentas": {
+    "instalador": {
+      "usuario": "pansys_instalador",
+      "host": "127.0.0.1",
+      "credenciales": "C:\\CAMBIAR\\carpeta_fuera_del_repositorio\\instalador.env"
+    },
+    "aplicacion": {
+      "usuario": "pansys_app_cambiar",
+      "host": "127.0.0.1",
+      "credenciales": "C:\\CAMBIAR\\carpeta_fuera_del_repositorio\\aplicacion.env"
+    }
+  },
+  "sha256": {
+    "01_esquema.sql": "CAMBIAR por el SHA-256 aprobado del manifiesto",
+    "04_verificar.sql": "CAMBIAR por el SHA-256 aprobado del manifiesto"
+  },
+  "panaderias": [
+    {
+      "nombre": "CAMBIAR nombre de la panadería 1",
+      "direccion": "CAMBIAR dirección de la panadería 1",
+      "localidad": "CAMBIAR localidad o barrio",
+      "telefono": null,
+      "en_red": true,
+      "administrador": { "email": "administrador1@ejemplo.invalid" }
+    },
+    {
+      "nombre": "CAMBIAR nombre de la panadería 2",
+      "direccion": "CAMBIAR dirección de la panadería 2",
+      "localidad": "CAMBIAR localidad o barrio",
+      "telefono": null,
+      "en_red": true,
+      "administrador": { "email": "administrador2@ejemplo.invalid" }
+    }
+  ],
+  "desmontaje": {
+    "bases": ["pansys_inst_cambiar"],
+    "cuentas": [{ "usuario": "pansys_instalador", "host": "127.0.0.1" }],
+    "protegidas": ["CAMBIAR_base_que_debe_seguir_intacta"]
+  }
+}
