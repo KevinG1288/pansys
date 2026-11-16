@@ -1,6 +1,6 @@
 // Pruebas unitarias de la red colaborativa, etapa E1c (aceptar una solicitud y transferir el inventario):
 // - SQL idéntico al de aceptar del protocolo validado en el ensayo E6 (pruebas/lib/operaciones.js del paquete
-//   C:\PansysEnsayo\trabajo\sql006; cadenas copiadas aquí y, si el archivo existe, comparadas con él);
+//   sql006 de ensayo, externo al repositorio; cadenas copiadas aquí y, si el archivo existe, comparadas con él);
 // - secuencia, orden de bloqueos (L1 pareja X -> L2 panaderías S -> L3 pendientes S y solicitud X ->
 //   L4 TODAS las materias X en una sentencia, por id -> L5 detalle X al fijar el origen) y una única transacción;
 // - efectos sobre una base simulada con estado y ROLLBACK que emula las restricciones del 006 implicadas
@@ -53,7 +53,8 @@ const REFERENCIA = {
   LEER_PENDIENTES: "SELECT id FROM solicitudes_red FORCE INDEX (idx_sred_pareja) WHERE pareja_menor_id = ? AND pareja_mayor_id = ? AND estado = 'pendiente' FOR SHARE",
   CONTADOR_MENOS: 'UPDATE red_parejas SET pendientes = pendientes - 1, updatedAt = NOW() WHERE panaderia_menor_id = ? AND panaderia_mayor_id = ?'
 };
-const RUTA_REFERENCIA = 'C:/PansysEnsayo/trabajo/sql006/pruebas/lib/operaciones.js';
+// Comparación opcional con el paquete de ensayo sql006 (fuera del repositorio): ruta en PANSYS_REFERENCIA_SQL006.
+const RUTA_REFERENCIA = process.env.PANSYS_REFERENCIA_SQL006 || null;
 
 const U = (texto) => Math.round(Number(texto) * 10000);             // decimal -> diezmilésimas
 const D = (u) => `${Math.trunc(u / 10000)}.${String(u % 10000).padStart(4, '0')}`;   // diezmilésimas -> texto
@@ -73,10 +74,10 @@ const main = async () => {
   // ---------- 1. SQL idéntico al protocolo
   console.log('\n== SQL del protocolo validado (aceptar, E6)');
   for (const [k, ref] of Object.entries(REFERENCIA)) igual(`${k} idéntico a la referencia`, S[k], ref);
-  if (fs.existsSync(RUTA_REFERENCIA)) {
+  if (RUTA_REFERENCIA && fs.existsSync(RUTA_REFERENCIA)) {
     const texto = fs.readFileSync(RUTA_REFERENCIA, 'utf8');
     igual('las 13 cadenas aparecen literalmente en operaciones.js del ensayo', Object.values(REFERENCIA).filter(r => !texto.includes(r)).length, 0);
-  } else console.log(`AVISO no se encuentra ${RUTA_REFERENCIA}: se usan solo las cadenas copiadas`);
+  } else console.log(`AVISO ${RUTA_REFERENCIA ? `no se encuentra ${RUTA_REFERENCIA}` : "sin PANSYS_REFERENCIA_SQL006"}: se usan solo las cadenas copiadas`);
   igual('lecturas previas sin bloqueo (orígenes de la proveedora y líneas de la solicitud)',
     [S.ORIGENES_PREVIA, S.LINEAS_SOLICITUD].map(s => /^SELECT /.test(s) && !/FOR (UPDATE|SHARE)/.test(s)), [true, true]);
 
