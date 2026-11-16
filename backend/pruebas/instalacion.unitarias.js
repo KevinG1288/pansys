@@ -181,8 +181,33 @@ const main = async () => {
   // ---------------- Sin identificadores locales en archivos versionados de instalación
   console.log('\n== Archivos de instalación sin identificadores locales');
   const archivosInstalacion = fs.readdirSync(DIR).filter(a => /\.(js|sql|json|md)$/.test(a));
-  const locales = archivosInstalacion.filter(a => /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|6b0b134d|9bf54206|PansysEnsayo|DESKTOP-|C:\\\\Users|C:\/Users|pansysensayo005/i.test(leer(path.join(DIR, a))));
-  igual('ningún archivo contiene server_uuid, rutas de usuario, equipo ni la base del ensayo anterior', locales, []);
+  // Patrones GENÉRICOS (aquí no se publica ningún identificador real): uuid completos, nombres de equipo
+  // por defecto de Windows, perfiles de usuario, cualquier ruta absoluta de unidad salvo C:\Windows
+  // (herramientas del sistema) y el marcador C:\CAMBIAR de la plantilla, y bases de ensayo numeradas.
+  // Cada desarrollador puede añadir sus identificadores reales SIN versionarlos, como texto literal:
+  //   PANSYS_PATRONES_LOCALES=texto1,texto2 node pruebas/instalacion.unitarias.js
+  const escaparRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const PATRONES_LOCALES_GENERICOS = [
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    /\b(?:DESKTOP|LAPTOP)-[A-Z0-9]{3,}\b/i,
+    /\b[A-Z]:[\\/]+(?:Users|Usuarios|Documents and Settings)[\\/]/i,
+    /(?:^|[\s'"`(=])\/(?:home|Users)\/[^/\s'"`]+/,
+    /\b[A-Z]:[\\/]+(?!(?:Windows|CAMBIAR)(?:[\\/]|\b))[A-Za-z0-9_.-]/i,
+    /\bpansys_?ensayo\d+\b/i
+  ];
+  const patronesLocales = (extra = []) => [...PATRONES_LOCALES_GENERICOS, ...extra.filter(Boolean).map(t => new RegExp(escaparRegex(t), 'i'))];
+  const contieneLocal = (texto, patrones) => patrones.some(p => p.test(texto));
+  const extraEntorno = (process.env.PANSYS_PATRONES_LOCALES || '').split(',').map(t => t.trim()).filter(Boolean);
+  const patrones = patronesLocales(extraEntorno);
+  const POSITIVOS = ['aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', 'DESKTOP-ABC1234', 'LAPTOP-XYZ99', 'C:\\Users\\alguien\\x', 'C:\\\\Users\\\\alguien',
+    'C:/Users/alguien', 'D:\\Respaldos\\x.sql', 'E:/datos/x', 'C:\\Carpeta\\datos', ' /home/alguien/x', "'/Users/alguien/x'", 'pansysensayo007', 'pansys_ensayo12'];
+  const NEGATIVOS = ['C:\\Windows\\System32\\icacls.exe', 'C:\\\\Windows\\\\System32\\\\whoami.exe', 'C:\\CAMBIAR\\carpeta_fuera_del_repositorio\\',
+    '127.0.0.1:3317', 'https://ejemplo.local/ruta', 'pansys_inst_ensayo', 'base:pansys_db', 'node database/instalacion/cli.js'];
+  igual('el detector reconoce identificadores locales ficticios', POSITIVOS.filter(t => !contieneLocal(t, PATRONES_LOCALES_GENERICOS)), []);
+  igual('el detector no marca rutas del sistema, marcadores ni texto legítimo', NEGATIVOS.filter(t => contieneLocal(t, PATRONES_LOCALES_GENERICOS)), []);
+  igual('patrones extra por entorno: texto literal, sin comodines', [contieneLocal('equipo ABC.1', patronesLocales(['ABC.1'])), contieneLocal('equipo ABCx1', patronesLocales(['ABC.1']))], [true, false]);
+  const locales = archivosInstalacion.filter(a => contieneLocal(leer(path.join(DIR, a)), patrones));
+  igual(`ningún archivo contiene uuid, equipo, perfil de usuario, ruta local ni base de ensayo numerada${extraEntorno.length ? ` (+${extraEntorno.length} patrones locales del entorno)` : ''}`, locales, []);
   igual('la plantilla insegura 03_cuenta_app.sql ya no existe', fs.existsSync(path.join(DIR, '03_cuenta_app.sql')), false);
 
   // ---------------- Inventario del código (respalda los privilegios de cuentas.js)
@@ -202,7 +227,7 @@ const main = async () => {
   const v = comun.validarParametros(D.parametros(), { repositorio: D.REPOSITORIO });
   igual('parámetros válidos se aceptan y se normalizan',
     [v.conexion, v.panaderias.map(p => p.email), v.panaderias[0].telefono, v.cuentas.instalador.usuario, v.desmontaje.protegidas],
-    [{ host: '127.0.0.1', puerto: 3317, base: 'pansys_inst_ensayo' }, ['norte@correo.co', 'sur@correo.co'], null, 'pansys_instalador', ['pansysensayo005']]);
+    [{ host: '127.0.0.1', puerto: 3317, base: 'pansys_inst_ensayo' }, ['norte@correo.co', 'sur@correo.co'], null, 'pansys_instalador', ['pansys_historica_ficticia']]);
   const rechaza = (descripcion, cambiar, patron) => {
     const p = D.parametros(); cambiar(p);
     const e = lanza(() => comun.validarParametros(p, { repositorio: D.REPOSITORIO }));
@@ -245,7 +270,7 @@ const main = async () => {
   rechaza('la misma cuenta para instalación y aplicación', p => { p.cuentas.aplicacion.usuario = 'pansys_instalador'; }, /distintas/);
   rechaza('sin sha256', p => { delete p.sha256; }, /faltan claves \(sha256\)/);
   rechaza('sha256 de ejemplo', p => { p.sha256['01_esquema.sql'] = 'CAMBIAR'; }, /SHA-256/);
-  rechaza('desmontaje de una base que no es del ensayo', p => { p.desmontaje.bases.push('pansysensayo005'); }, /no es un objeto del ensayo/);
+  rechaza('desmontaje de una base que no es del ensayo', p => { p.desmontaje.bases.push('pansys_historica_ficticia'); }, /no es un objeto del ensayo/);
   rechaza('desmontaje de pansys_db', p => { p.desmontaje.bases = ['pansys_db']; }, /no es un objeto del ensayo/);
   rechaza('desmontaje de pansys_test', p => { p.desmontaje.bases = ['pansys_test']; }, /nunca es destino/);
   rechaza('desmontaje de una cuenta ajena', p => { p.desmontaje.cuentas = [{ usuario: 'pansys_ensayo', host: '127.0.0.1' }]; }, /no es una cuenta del ensayo/);
@@ -325,7 +350,7 @@ const main = async () => {
   };
   const otro = (cambio) => ({ identidad: { ...D.IDENTIDAD, ...cambio } });
   igual('destino correcto: se acepta y solo lee', await destino({}), { ok: true, soloLectura: true });
-  igual('otro server_uuid (p. ej. el MySQL de desarrollo)', await destino(otro({ server_uuid: '6b0b134d-be81-11f0-922a-000000000000' }), /identidad del servidor/), { ok: true, soloLectura: true });
+  igual('otro server_uuid (p. ej. el MySQL de desarrollo)', await destino(otro({ server_uuid: 'aaaaaaaa-bbbb-4ccc-8ddd-000000000000' }), /identidad del servidor/), { ok: true, soloLectura: true });
   igual('otro puerto (p. ej. 3306)', await destino(otro({ puerto: 3306 }), /identidad del servidor/), { ok: true, soloLectura: true });
   igual('otro datadir', await destino(otro({ datadir: 'C:\\otro\\Data\\' }), /identidad del servidor/), { ok: true, soloLectura: true });
   igual('la conexión apunta a otra base', await destino({ base: 'pansys_db' }, /no apunta a la base/), { ok: true, soloLectura: true });

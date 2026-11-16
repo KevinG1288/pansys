@@ -27,7 +27,7 @@ const parametros = () => ({
   desmontaje: {
     bases: ['pansys_inst_ensayo', 'pansys_inst_senuelo', 'pansysxinstxensayo'],
     cuentas: [{ usuario: 'pansys_instalador', host: '127.0.0.1' }, { usuario: 'pansys_app_ensayo', host: '127.0.0.1' }],
-    protegidas: ['pansysensayo005']
+    protegidas: ['pansys_historica_ficticia']
   }
 });
 const RUTA_PARAMETROS = path.join(FUERA, 'parametros.json');

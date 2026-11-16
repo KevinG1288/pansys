@@ -77,7 +77,7 @@ const main = async () => {
 
   // ---------------------------------------------------------------- Archivos protegidos (dobles)
   console.log('\n== Archivos protegidos: lógica con dobles');
-  const WHOAMI = '"desktop-x\\usuario","S-1-5-21-1-2-3-1001"\r\n';
+  const WHOAMI = '"equipo-prueba\\usuario","S-1-5-21-1-2-3-1001"\r\n';
   const crearReal = (salidaIcacls) => {
     const llamadas = [];
     const memoria = new Map();
@@ -90,7 +90,7 @@ const main = async () => {
     const ejecutar = (prog, args) => { programas.push(prog); const corto = path.win32.basename(prog, '.exe'); llamadas.push([corto, ...args]); return corto === 'whoami' ? WHOAMI : salidaIcacls; };
     return { a: comun.crearArchivosReales({ fs: fsFalso, ejecutar, plataforma: 'win32', dirSistema: 'C:\\Windows\\System32' }), llamadas, memoria, programas };
   };
-  const ICACLS_OK = 'C:\\fuera\\x.env DESKTOP-X\\Usuario:(F)\r\n\r\nSe procesaron correctamente 1 archivos; error al procesar 0 archivos\r\n';
+  const ICACLS_OK = 'C:\\fuera\\x.env EQUIPO-PRUEBA\\Usuario:(F)\r\n\r\nSe procesaron correctamente 1 archivos; error al procesar 0 archivos\r\n';
   {
     const { a, llamadas, memoria, programas } = crearReal(ICACLS_OK);
     a.crearProtegido('C:\\fuera\\x.env');
@@ -104,10 +104,10 @@ const main = async () => {
     igual('el contenido queda escrito', memoria.get('C:\\fuera\\x.env').includes('SECRETO-FICTICIO'), true);
   }
   for (const [descripcion, salidaIcacls] of [
-    ['permiso heredado (I)', 'C:\\fuera\\x.env DESKTOP-X\\Usuario:(I)(F)\r\n'],
-    ['dos permisos', 'C:\\fuera\\x.env DESKTOP-X\\Usuario:(F)\r\n                BUILTIN\\Usuarios:(RX)\r\n'],
-    ['otro usuario', 'C:\\fuera\\x.env DESKTOP-X\\Otro:(F)\r\n'],
-    ['solo lectura para el usuario', 'C:\\fuera\\x.env DESKTOP-X\\Usuario:(R)\r\n']
+    ['permiso heredado (I)', 'C:\\fuera\\x.env EQUIPO-PRUEBA\\Usuario:(I)(F)\r\n'],
+    ['dos permisos', 'C:\\fuera\\x.env EQUIPO-PRUEBA\\Usuario:(F)\r\n                BUILTIN\\Usuarios:(RX)\r\n'],
+    ['otro usuario', 'C:\\fuera\\x.env EQUIPO-PRUEBA\\Otro:(F)\r\n'],
+    ['solo lectura para el usuario', 'C:\\fuera\\x.env EQUIPO-PRUEBA\\Usuario:(R)\r\n']
   ]) {
     const { a } = crearReal(salidaIcacls);
     igual(`verificarProtegido rechaza: ${descripcion}`, /no está restringido/.test(lanza(() => a.verificarProtegido('C:\\fuera\\x.env'))?.message), true);
@@ -421,14 +421,14 @@ const main = async () => {
   // ---------------------------------------------------------------- desmontaje.js
   console.log('\n== desmontaje.js');
   const crearDesmontaje = (o = {}) => {
-    const cfg = { existenBases: ['pansys_inst_ensayo', 'pansys_inst_senuelo', 'pansysxinstxensayo', 'pansysensayo005'], existenCuentas: ['pansys_instalador', 'pansys_app_ensayo'], ajenas: 0, checksum: '111', cambiaHuella: false, dropFalla: null, identidad: D.IDENTIDAD, ...o };
+    const cfg = { existenBases: ['pansys_inst_ensayo', 'pansys_inst_senuelo', 'pansysxinstxensayo', 'pansys_historica_ficticia'], existenCuentas: ['pansys_instalador', 'pansys_app_ensayo'], ajenas: 0, checksum: '111', cambiaHuella: false, dropFalla: null, identidad: D.IDENTIDAD, ...o };
     let checksums = 0;
     return D.crearMysql([
       [/^SELECT @@port AS puerto/, () => [[{ puerto: cfg.identidad.puerto, uuid: cfg.identidad.server_uuid, datadir: cfg.identidad.datadir, base: null }]]],
       [/FROM information_schema\.SCHEMATA WHERE SCHEMA_NAME = \?/, ([b]) => [[{ n: cfg.existenBases.includes(b) ? 1 : 0 }]]],
       [/COUNT\(\*\) AS n FROM information_schema\.TABLES WHERE TABLE_SCHEMA = \?/, () => [[{ n: 17 }]]],
       [/SELECT TABLE_NAME AS t FROM information_schema\.TABLES/, () => [[{ t: 'roles' }, { t: 'usuarios' }]]],
-      [/^CHECKSUM TABLE/, () => { checksums++; return [[{ Table: 'pansysensayo005.roles', Checksum: cfg.cambiaHuella && checksums > 1 ? '999' : cfg.checksum }, { Table: 'pansysensayo005.usuarios', Checksum: '222' }]]; }],
+      [/^CHECKSUM TABLE/, () => { checksums++; return [[{ Table: 'pansys_historica_ficticia.roles', Checksum: cfg.cambiaHuella && checksums > 1 ? '999' : cfg.checksum }, { Table: 'pansys_historica_ficticia.usuarios', Checksum: '222' }]]; }],
       [/FROM mysql\.user WHERE User = \? AND Host = \?/, ([u]) => [[{ n: cfg.existenCuentas.includes(u) ? 1 : 0 }]]],
       [/PROCESSLIST/, () => [[{ n: cfg.ajenas }]]],
       [/^DROP USER/, (p, sql) => { if (cfg.dropFalla && cfg.dropFalla.test(sql)) throw cfg.dropError || D.errorMysql('ER_CANNOT_USER', 1396); const u = /'([^']+)'@/.exec(sql)[1]; cfg.existenCuentas = cfg.existenCuentas.filter(x => x !== u); return [{}]; }],
@@ -461,14 +461,14 @@ const main = async () => {
       ["DROP USER 'pansys_instalador'@'127.0.0.1'", "DROP USER 'pansys_app_ensayo'@'127.0.0.1'", 'DROP DATABASE `pansys_inst_ensayo`', 'DROP DATABASE `pansys_inst_senuelo`', 'DROP DATABASE `pansysxinstxensayo`']);
     igual('ejecutar: código 0, protegida con la misma huella, credenciales retiradas',
       [r.codigo, /misma huella/.test(r.salida), r.arch.contenido.size], [0, true, 0]);
-    igual('nunca toca la base protegida', r.drops.some(x => /pansysensayo005/.test(x)), false);
+    igual('nunca toca la base protegida', r.drops.some(x => /pansys_historica_ficticia/.test(x)), false);
   }
   for (const [descripcion, argv, o, extra, patron] of [
     ['frase incorrecta', ['--ejecutar'], {}, { frase: 'DESMONTAR' }, /Frase de autorización incorrecta/],
     ['sin --solo-comprobar ni --ejecutar', [], {}, {}, /exactamente uno/],
     ['con las dos banderas', ['--solo-comprobar', '--ejecutar'], {}, {}, /exactamente uno/],
     ['otra identidad de servidor', ['--ejecutar'], { identidad: { ...D.IDENTIDAD, server_uuid: 'aaaaaaaa-2222-3333-4444-555555555555' } }, {}, /identidad/],
-    ['base protegida ausente', ['--ejecutar'], { existenBases: ['pansys_inst_ensayo'] }, {}, /protegida pansysensayo005 no existe/],
+    ['base protegida ausente', ['--ejecutar'], { existenBases: ['pansys_inst_ensayo'] }, {}, /protegida pansys_historica_ficticia no existe/],
     ['sesiones ajenas', ['--ejecutar'], { ajenas: 2 }, {}, /sesiones ajenas/],
     ['parámetros sin bloque desmontaje', ['--ejecutar'], {}, { datos: (() => { const p = D.parametros(); delete p.desmontaje; return p; })() }, /no tienen bloque/]
   ]) {
@@ -485,10 +485,10 @@ const main = async () => {
   }
   {
     const r = await desmontar(['--ejecutar'], { cambiaHuella: true });
-    igual('huella de la protegida cambiada: ALTO (código 1)', [r.codigo, /ALTO: la huella de la base protegida pansysensayo005 ha CAMBIADO/.test(r.salida)], [1, true]);
+    igual('huella de la protegida cambiada: ALTO (código 1)', [r.codigo, /ALTO: la huella de la base protegida pansys_historica_ficticia ha CAMBIADO/.test(r.salida)], [1, true]);
   }
   {
-    const r = await desmontar(['--ejecutar'], { existenBases: ['pansysensayo005'], existenCuentas: [] });
+    const r = await desmontar(['--ejecutar'], { existenBases: ['pansys_historica_ficticia'], existenCuentas: [] });
     igual('nada que eliminar: código 0 sin DROP', [r.codigo, r.drops, /no había nada que eliminar/.test(r.salida)], [0, [], true]);
   }
 
