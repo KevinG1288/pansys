@@ -29,7 +29,7 @@
 // variables PANSYS_SMTP_* que pudiera traer el .env se eliminan del proceso.
 //
 // Escrituras solo de prueba (autorizadas), por Sequelize tras comprobar SELECT DATABASE() y el bloqueo:
-//  - 3 sondas que DEBEN fallar (CHECK 3819, FK 1452, UNIQUE 1062);
+//  - 3 sondas que DEBEN fallar (CHECK 3819, FK 1452 o 1216 con fk_evento_usuario verificada, UNIQUE 1062);
 //  - UPDATE de envejecimiento de enlaces propios (createdAt, expira_en y enviado_en desplazados
 //    hacia atrás), por id y cuenta propia, para probar la caducidad y la recuperación de reservas.
 //
@@ -317,6 +317,8 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { sequelize } = require('../src/models/index');
 const { iniciarEjecucion, limpiezaCorrecta, describirPendientes } = require('./aislamiento');
+const { construirLineaBase, validarLineaBase, idsParaSql, compararConLineaBase, describirDiferencias,
+  errnoAceptado, ERRNO_FK_EVENTO_USUARIO, validarFkEventoUsuario } = require('./lineabase005');
 
 const ID_INEXISTENTE = 2147483647;
 const resultados = [];
@@ -332,6 +334,7 @@ const igual = (descripcion, real, esperado) =>
   registrar(JSON.stringify(real) === JSON.stringify(esperado), descripcion, `obtenido ${JSON.stringify(real)}, esperado ${JSON.stringify(esperado)}`);
 
 let ejecucion = null;
+let lineaBase005 = null; // filas previas (legítimas e inertes) de las tablas del SQL 005: se conservan intactas
 let servidor = null;
 let PUERTO_SERVIDOR = null; // puerto del servidor de pruebas, solo tras confirmar su identidad
 const TOKENS = {};
@@ -399,6 +402,11 @@ const esperar = async (descripcion, status, metodo, ruta, usuario, body) => {
 // ---------- Lecturas, siempre limitadas a las cuentas propias ----------
 const propias = () => (ejecucion.ids('usuarios').length ? ejecucion.ids('usuarios') : [0]);
 const consulta = async (sql, replacements) => (await sequelize.query(sql, { replacements }))[0];
+// Filas COMPLETAS de las dos tablas del SQL 005 (todas las columnas) para la línea base (pruebas/lineabase005.js)
+const capturarTablas005 = async () => ({
+  restablecimientos: await consulta('SELECT * FROM pansys_test.restablecimientos_contrasena ORDER BY id'),
+  eventos: await consulta('SELECT * FROM pansys_test.eventos_seguridad ORDER BY id')
+});
 const enlacesDe = async (etiqueta) => (await consulta(
   'SELECT id, estado, motivo, origen, solicitado_por, intentos_fallidos FROM pansys_test.restablecimientos_contrasena WHERE usuario_id = ? AND usuario_id IN (?) ORDER BY id',
   [cuentas[etiqueta], propias()])).map(e => ({ ...e, intentos_fallidos: Number(e.intentos_fallidos) }));
@@ -417,15 +425,27 @@ const escrituraDePrueba = async (sql, replacements) => {
   await ejecucion.exigirBloqueo();
   return sequelize.query(sql, { replacements });
 };
-const sonda = async (descripcion, sql, replacements, errnoEsperado) => {
+// errnoEsperado: código exacto (número) o lista explícita de códigos admitidos (ver lineabase005.errnoAceptado).
+// antesDeAceptar (opcional): comprobación de solo lectura que debe devolver [] para dar por válida la sonda.
+const sonda = async (descripcion, sql, replacements, errnoEsperado, { antesDeAceptar } = {}) => {
   try {
     await escrituraDePrueba(sql, replacements);
     registrar(false, descripcion, 'la escritura NO falló');
   } catch (error) {
     const errno = error?.parent?.errno ?? error?.original?.errno ?? null;
-    registrar(errno === errnoEsperado, descripcion, `errno ${errno}`);
+    let ok = errnoAceptado(errno, errnoEsperado);
+    let detalle = `errno ${errno}`;
+    if (ok && antesDeAceptar) {
+      const errores = await antesDeAceptar();
+      if (errores.length) { ok = false; detalle += `; ${errores.join('; ')}`; }
+    }
+    registrar(ok, descripcion, detalle);
   }
 };
+// Estructura real de fk_evento_usuario (solo lectura en information_schema)
+const comprobarFkEventoUsuario = async () => validarFkEventoUsuario(
+  await consulta("SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE CONSTRAINT_SCHEMA = 'pansys_test' AND CONSTRAINT_NAME = 'fk_evento_usuario'"),
+  await consulta("SELECT CONSTRAINT_SCHEMA, TABLE_NAME, REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = 'pansys_test' AND CONSTRAINT_NAME = 'fk_evento_usuario'"));
 // Desplaza hacia atrás las fechas de un enlace propio (por id y cuenta propia): exactamente 1 fila
 const envejecer = async (enlaceId, etiqueta, segundos) => {
   const [r] = await escrituraDePrueba(
@@ -592,14 +612,30 @@ const cerrarServidor = () => new Promise((resolve, reject) => {
 
 const main = async () => {
   await controlesDeRed();
-  // ---------- Protección: pansys_test, SQL 005 presente y sus tablas vacías (sin filas ajenas) ----------
+  // ---------- Protección: pansys_test, SQL 005 presente y línea base de sus tablas (filas previas inertes) ----------
   await sequelize.authenticate();
   const [[{ base }]] = await sequelize.query('SELECT DATABASE() AS base');
   if (base !== 'pansys_test') throw new Error(`Base conectada "${base}": las pruebas solo se ejecutan sobre pansys_test`);
   const tablas005 = (await consulta("SELECT TABLE_NAME AS t FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'pansys_test' AND TABLE_NAME IN ('restablecimientos_contrasena', 'eventos_seguridad')")).length;
   if (tablas005 !== 2) throw new Error('Falta el SQL 005 en pansys_test: no se ejecuta nada');
-  const [{ n: filasPrevias }] = await consulta('SELECT (SELECT COUNT(*) FROM pansys_test.restablecimientos_contrasena) + (SELECT COUNT(*) FROM pansys_test.eventos_seguridad) AS n');
-  if (Number(filasPrevias) !== 0) throw new Error(`Las tablas del SQL 005 tienen ${filasPrevias} filas antes de empezar (ajenas a esta ejecución): no se escribe nada`);
+  // Filas previas (p. ej. un restablecimiento real probado a mano): se admiten SOLO si son inertes (enlaces
+  // en estado terminal y caducados; expira_en está en UTC) y no pertenecen a cuentas de prueba. Se capturan
+  // completas ANTES de cualquier escritura y al final deben seguir exactamente iguales. No se tocan nunca.
+  const estadoPrevio = {
+    restablecimientos: await consulta(`SELECT r.id, r.estado, (r.expira_en < UTC_TIMESTAMP()) AS caducado,
+      EXISTS (SELECT 1 FROM pansys_test.usuarios u WHERE u.id IN (r.usuario_id, r.solicitado_por) AND u.email LIKE 'prueba.%') AS cuenta_prueba
+      FROM pansys_test.restablecimientos_contrasena r ORDER BY r.id`),
+    eventos: await consulta(`SELECT e.id, EXISTS (SELECT 1 FROM pansys_test.usuarios u WHERE u.id IN (e.usuario_id, e.actor_id) AND u.email LIKE 'prueba.%') AS cuenta_prueba
+      FROM pansys_test.eventos_seguridad e ORDER BY e.id`)
+  };
+  const erroresLineaBase = validarLineaBase(estadoPrevio);
+  if (erroresLineaBase.length) throw new Error(`Las tablas del SQL 005 tienen filas previas no inertes o de pruebas (${erroresLineaBase.join('; ')}): no se escribe nada`);
+  lineaBase005 = construirLineaBase(await capturarTablas005());
+  const previasN = { r: Object.keys(lineaBase005.restablecimientos).length, e: Object.keys(lineaBase005.eventos).length };
+  if (previasN.r !== estadoPrevio.restablecimientos.length || previasN.e !== estadoPrevio.eventos.length) {
+    throw new Error('Las tablas del SQL 005 cambiaron mientras se capturaba la línea base: no se escribe nada');
+  }
+  console.log(`      línea base del SQL 005: ${previasN.r} enlaces y ${previasN.e} eventos previos, inertes; se conservarán sin cambios`);
 
   ejecucion = await iniciarEjecucion({ suite: 'restablecimiento', sequelize });
   console.log(`      runId de esta ejecución: ${ejecucion.runId} (filas marcadas con "prueba.restablecimiento.${ejecucion.runId}." y "PRUEBA ${ejecucion.runId}")`);
@@ -653,9 +689,11 @@ const main = async () => {
     [cuentas.t2, `${ejecucion.runId} sonda check`], 3819);
   const inexistente = Number((await consulta('SELECT COUNT(*) AS n FROM pansys_test.usuarios WHERE id = ?', [ID_INEXISTENTE]))[0].n);
   if (inexistente !== 0) throw new Error(`El id ${ID_INEXISTENTE} existe en usuarios: no se envía la sonda`);
-  await sonda('FK: evento de una cuenta inexistente -> 1452',
+  // 1452 (con detalle) o 1216 (genérico: depende de los privilegios de la sesión sobre la tabla padre; la
+  // cuenta limitada de integración recibe 1216). Solo esos dos, y solo si fk_evento_usuario es la esperada.
+  await sonda('FK: evento de una cuenta inexistente -> 1452 o 1216 (fk_evento_usuario)',
     "INSERT INTO pansys_test.eventos_seguridad (tipo, usuario_id, panaderia_id, actor_id, restablecimiento_id, detalle, createdAt) VALUES ('email_cambiado', ?, NULL, NULL, NULL, NULL, UTC_TIMESTAMP())",
-    [ID_INEXISTENTE], 1452);
+    [ID_INEXISTENTE], ERRNO_FK_EVENTO_USUARIO, { antesDeAceptar: comprobarFkEventoUsuario });
   igual('las sondas no dejaron filas', [(await enlacesDe('t2')).length,
     Number((await consulta('SELECT COUNT(*) AS n FROM pansys_test.eventos_seguridad WHERE usuario_id = ?', [ID_INEXISTENTE]))[0].n)], [0, 0]);
 
@@ -874,14 +912,15 @@ main()
 
     let limpieza = null;
     if (ejecucion) {
-      // Sin filas ajenas: toda fila de las tablas del SQL 005 referencia solo cuentas propias
+      // Sin filas ajenas NUEVAS: toda fila de las tablas del SQL 005 que no sea de la línea base referencia
+      // solo cuentas propias (las de la línea base son previas, inertes y se comparan aparte)
       grupo('Limpieza y filas residuales');
       try {
         const [{ n }] = await consulta(
-          'SELECT (SELECT COUNT(*) FROM pansys_test.restablecimientos_contrasena WHERE usuario_id NOT IN (?) OR (solicitado_por IS NOT NULL AND solicitado_por NOT IN (?))) + ' +
-          '(SELECT COUNT(*) FROM pansys_test.eventos_seguridad WHERE usuario_id NOT IN (?) OR (actor_id IS NOT NULL AND actor_id NOT IN (?))) AS n',
-          [propias(), propias(), propias(), propias()]);
-        igual('antes de limpiar: ninguna fila de las tablas del SQL 005 referencia cuentas ajenas', Number(n), 0);
+          'SELECT (SELECT COUNT(*) FROM pansys_test.restablecimientos_contrasena WHERE id NOT IN (?) AND (usuario_id NOT IN (?) OR (solicitado_por IS NOT NULL AND solicitado_por NOT IN (?)))) + ' +
+          '(SELECT COUNT(*) FROM pansys_test.eventos_seguridad WHERE id NOT IN (?) AND (usuario_id NOT IN (?) OR (actor_id IS NOT NULL AND actor_id NOT IN (?)))) AS n',
+          [idsParaSql(lineaBase005, 'restablecimientos'), propias(), propias(), idsParaSql(lineaBase005, 'eventos'), propias(), propias()]);
+        igual('antes de limpiar: ninguna fila nueva de las tablas del SQL 005 referencia cuentas ajenas', Number(n), 0);
       } catch (error) { registrar(false, 'comprobación de filas ajenas', error.message); }
       limpieza = await ejecucion.limpiar(); // nunca lanza; no se reintenta
       const correcta = limpiezaCorrecta(limpieza);
@@ -891,10 +930,14 @@ main()
         try {
           const ids = propias();
           const [r] = await consulta(
-            'SELECT (SELECT COUNT(*) FROM pansys_test.usuarios WHERE id IN (?)) AS u, (SELECT COUNT(*) FROM pansys_test.panaderias WHERE id IN (?)) AS p, ' +
-            '(SELECT COUNT(*) FROM pansys_test.restablecimientos_contrasena) AS r, (SELECT COUNT(*) FROM pansys_test.eventos_seguridad) AS e',
+            'SELECT (SELECT COUNT(*) FROM pansys_test.usuarios WHERE id IN (?)) AS u, (SELECT COUNT(*) FROM pansys_test.panaderias WHERE id IN (?)) AS p',
             [ids, ejecucion.ids('panaderias').length ? ejecucion.ids('panaderias') : [0]]);
-          igual('después: 0 cuentas y panaderías propias, y las tablas del SQL 005 vacías', [Number(r.u), Number(r.p), Number(r.r), Number(r.e)], [0, 0, 0, 0]);
+          igual('después: 0 cuentas y panaderías propias', [Number(r.u), Number(r.p)], [0, 0]);
+          // Las tablas del SQL 005 contienen EXACTAMENTE la línea base: ni filas nuevas (propias sin limpiar o
+          // ajenas), ni filas previas borradas o modificadas (huella SHA-256 de todas las columnas)
+          const cmp = compararConLineaBase(lineaBase005, await capturarTablas005());
+          igual('después: las tablas del SQL 005 coinciden exactamente con la línea base (sin filas añadidas, borradas ni modificadas)',
+            cmp.ok ? 'idénticas' : describirDiferencias(cmp).join('; '), 'idénticas');
         } catch (error) { registrar(false, 'comprobación posterior a la limpieza', error.message); }
       }
       try { await ejecucion.cerrar(); } catch (error) { problemasCierre.push(`conexión dedicada: ${error.message}`); }
