@@ -176,7 +176,7 @@ function ejecutarPruebas() {
   const main = async () => {
     console.log('\n== E1e: barreras sin conexion');
     const red = require('./red.pruebas');
-    const daemon = { TYPE: 'FOREGROUND', PROCESSLIST_COMMAND: 'Daemon', CONNECTION_TYPE: null, PROCESSLIST_DB: null };
+    const daemon = { TYPE: 'FOREGROUND', PROCESSLIST_COMMAND: 'Daemon', CONNECTION_TYPE: null, PROCESSLIST_DB: null, INSTRUMENTED: 'YES' };
     const scheduler = { ...daemon, NAME: 'thread/sql/event_scheduler', PROCESSLIST_USER: 'event_scheduler', PROCESSLIST_HOST: 'localhost' };
     const gtid = { ...daemon, NAME: 'thread/sql/compress_gtid_table', PROCESSLIST_USER: null, PROCESSLIST_HOST: null };
     igual('solo daemons internos acreditados sin eventos se excluyen', red.clasificarSesiones([scheduler, gtid]).peligrosas.length, 0);
@@ -186,9 +186,61 @@ function ejecutarPruebas() {
       igual('atributos de cliente o daemon desconocido siguen bloqueando', red.clasificarSesiones([f]).peligrosas.length, 1);
     }
     igual('scheduler con eventos habilitados no se excluye', red.clasificarSesiones([scheduler], 1).peligrosas.length, 1);
-    const lecturaSesiones = async sql => sql.includes('performance_schema.threads') ? [scheduler, gtid] : [{ n: 0 }];
-    igual('comprobacion completa admite internos acreditados y cero transacciones', (await red.comprobarSesiones(lecturaSesiones)).length, 2);
-    igual('transaccion ajena impide continuar', (await falla(() => red.comprobarSesiones(async sql => sql.includes('INNODB_TRX') ? [{n:1}] : lecturaSesiones(sql)))) instanceof Error, true);
+    // Evalúa el predicado de THREAD_ID de la consulta con la lógica de tres valores de SQL:
+    // «NOT (THREAD_ID <=> propio)» cuenta una fila NULL como ajena; «THREAD_ID <> propio» da NULL y la excluye.
+    const PROPIO = 7;
+    const contarAjenas = (sql, filas) => filas.filter(f => {
+      if (/NOT \(THREAD_ID <=> PS_CURRENT_THREAD_ID\(\)\)/.test(sql)) return !(f.THREAD_ID === PROPIO);
+      if (/THREAD_ID <> PS_CURRENT_THREAD_ID\(\)/.test(sql)) return f.THREAD_ID !== null && f.THREAD_ID !== PROPIO;
+      throw new Error('predicado de THREAD_ID no reconocido');
+    }).length;
+    // Doble de lectura: cada consulta se reconoce por su tabla; las sustituciones permiten simular cada fallo.
+    const lecturaCon = (o = {}) => { const vistas = []; const leer = async sql => { vistas.push(sql);
+      // (por la tabla del FROM: la consulta de instrumentación también nombra events_transactions_current)
+      if (sql.includes('FROM performance_schema.events_transactions_current') && o.filasTrx) return [{ n: contarAjenas(sql, o.filasTrx.filter(f => f.STATE === 'ACTIVE')) }];
+      if (sql.includes('FROM performance_schema.data_locks') && o.filasBloqueos) return [{ n: contarAjenas(sql, o.filasBloqueos) }];
+      if (sql.includes('FROM performance_schema.threads WHERE')) return o.hilos ?? [scheduler, gtid];
+      if (sql.includes('setup_consumers')) return [o.inst ?? { consumidor: 'YES', instrumento: 'YES' }];
+      if (sql.includes('@@GLOBAL.event_scheduler')) return [o.plan ?? { planificador: 'OFF', uuid: 'uuid-x', evento_global: 0 }];
+      if (sql.includes('information_schema.EVENTS')) return [{ n: o.eventos ?? 0 }];
+      if (sql.includes("SHOW GLOBAL STATUS LIKE 'Uptime'")) return [{ Variable_name: 'Uptime', Value: String(o.uptime ?? 1000) }];
+      if (sql.includes('events_transactions_current')) return [{ n: o.trx ?? 0 }];
+      if (sql.includes('performance_schema.data_locks')) return [{ n: o.bloqueos ?? 0 }];
+      throw new Error(`consulta no esperada: ${sql.slice(0, 40)}`); }; leer.vistas = vistas; return leer; };
+    const lecturaSesiones = lecturaCon();
+    igual('comprobacion completa admite internos acreditados y cero transacciones', (await red.comprobarSesiones(lecturaSesiones, { atestacion: '' })).length, 2);
+    igual('sin PROCESS: no consulta INNODB_TRX ni information_schema.PROCESSLIST', lecturaSesiones.vistas.some(s => /INNODB_TRX|information_schema\.PROCESSLIST/i.test(s)), false);
+    const fallaCon = async (o, opciones = { atestacion: '' }) => (await falla(() => red.comprobarSesiones(lecturaCon(o), opciones))) instanceof Error;
+    igual('transaccion ajena impide continuar', await fallaCon({ trx: 1 }), true);
+    igual('bloqueo ajeno impide continuar', await fallaCon({ bloqueos: 1 }), true);
+    // Se comprueba el MENSAJE del ALTO: un error del propio doble no debe hacer pasar la prueba.
+    const mensajeCon = async (o) => (await falla(() => red.comprobarSesiones(lecturaCon(o), { atestacion: '' })))?.message ?? '';
+    igual('bloqueo con THREAD_ID NULL (XA preparada separada de su sesion) -> ALTO «Existen bloqueos ajenos»', /Existen bloqueos ajenos/.test(await mensajeCon({ filasBloqueos: [{ THREAD_ID: null }] })), true);
+    igual('transaccion ACTIVE con THREAD_ID NULL -> ALTO «Existen transacciones ajenas»', /Existen transacciones ajenas/.test(await mensajeCon({ filasTrx: [{ THREAD_ID: null, STATE: 'ACTIVE' }] })), true);
+    igual('solo filas del propio hilo (y transacciones ajenas ya cerradas): continua', (await red.comprobarSesiones(lecturaCon({
+      filasBloqueos: [{ THREAD_ID: PROPIO }], filasTrx: [{ THREAD_ID: PROPIO, STATE: 'ACTIVE' }, { THREAD_ID: 99, STATE: 'COMMITTED' }] }), { atestacion: '' })).length, 2);
+    igual('regresion: con el predicado anterior «<>» la fila NULL se habria excluido', contarAjenas('WHERE THREAD_ID <> PS_CURRENT_THREAD_ID()', [{ THREAD_ID: null }]), 0);
+    { const l = lecturaCon(); await red.comprobarSesiones(l, { atestacion: '' });
+      const deThread = l.vistas.filter(s => /FROM performance_schema\.(events_transactions_current|data_locks)\b/.test(s));
+      igual('transacciones y bloqueos ajenos usan la comparacion NULL-safe (ninguna usa «THREAD_ID <>»)',
+        [deThread.length, deThread.every(s => /NOT \(THREAD_ID <=> PS_CURRENT_THREAD_ID\(\)\)/.test(s)), deThread.some(s => /THREAD_ID <>/.test(s))], [2, true, false]); }
+    igual('consumidor de transacciones desactivado impide continuar', await fallaCon({ inst: { consumidor: 'NO', instrumento: 'YES' } }), true);
+    igual('instrumento de transacciones desactivado impide continuar', await fallaCon({ inst: { consumidor: 'YES', instrumento: 'NO' } }), true);
+    igual('hilo sin instrumentar impide continuar', await fallaCon({ hilos: [scheduler, { ...gtid, INSTRUMENTED: 'NO' }] }), true);
+    // Planificador ON sin EVENT global: el scheduler solo se acredita con una atestación válida
+    const ON = { planificador: 'ON', uuid: 'uuid-x', evento_global: 0 };
+    const ahora = Date.parse('2026-11-16T10:00:00Z');
+    const at = (o = {}) => JSON.stringify({ uuid: 'uuid-x', eventos: 0, uptime: 1000 - 60, emitida: '2026-11-16T09:59:00Z', ...o });
+    igual('planificador ON sin atestacion: ALTO', await fallaCon({ plan: ON }, { atestacion: '', ahora }), true);
+    igual('planificador ON con atestacion valida: continua', (await red.comprobarSesiones(lecturaCon({ plan: ON, uptime: 1000 }), { atestacion: at(), ahora })).length, 2);
+    for (const [d, a, up] of [['de otro servidor', at({ uuid: 'otro' }), 1000], ['con eventos', at({ eventos: 1 }), 1000],
+      ['caducada (> 15 min)', at({ emitida: '2026-11-16T09:40:00Z', uptime: 1000 - 1200 }), 1000], ['con reinicio posterior (Uptime menor)', at(), 30],
+      ['con fecha incoherente con el Uptime', at({ uptime: 100 }), 1000], ['ilegible', '{no-json', 1000], ['del futuro', at({ emitida: '2026-11-16T10:05:00Z' }), 1000]]) {
+      igual(`atestacion ${d}: ALTO`, await fallaCon({ plan: ON, uptime: up }, { atestacion: a, ahora }), true);
+    }
+    igual('con EVENT global cuentan los eventos visibles (0: continua)', (await red.comprobarSesiones(lecturaCon({ plan: { ...ON, evento_global: 1 } }), { atestacion: '' })).length, 2);
+    igual('con EVENT global y un evento habilitado: ALTO', await fallaCon({ plan: { ...ON, evento_global: 1 }, eventos: 1 }), true);
+    igual('eventosDemostrables exportada', typeof red.eventosDemostrables, 'function');
     igual('E1e tiene diez escenarios', red.ESCENARIOS.length, 10);
     const evidencia = path.join(require('os').tmpdir(), 'pansys-e1e-unitario-' + process.pid);
     const argvRed = ['--ejecutar', '--evidencia', evidencia];

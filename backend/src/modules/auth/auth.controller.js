@@ -11,11 +11,12 @@ class AuthController {
         return res.status(400).json({ error: 'Email y contraseña son requeridos' });
       }
 
-      const resultado = await authService.login(email, contrasena);
+      const resultado = await authService.login(email, contrasena, { ip: req.ip });
       res.json(resultado);
 
     } catch (error) {
-      // 401 "Credenciales inválidas"; cualquier error interno es un 500 sin detalles
+      // 401 "Credenciales inválidas"; 429 con Retry-After si se agotaron los intentos (por IP o por
+      // cuenta); cualquier error interno es un 500 sin detalles
       responderError(res, error);
     }
   }

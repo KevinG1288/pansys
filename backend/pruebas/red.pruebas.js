@@ -39,16 +39,60 @@ const clasificarSesiones = (filas, eventosHabilitados = 0) => {
   }
   return { internas, peligrosas };
 };
-const comprobarSesiones = async leer => {
-  const filas = await leer(`SELECT THREAD_ID, NAME, TYPE, PROCESSLIST_ID, PROCESSLIST_USER,
-    PROCESSLIST_HOST, PROCESSLIST_DB, PROCESSLIST_COMMAND, CONNECTION_TYPE
-    FROM performance_schema.threads WHERE PROCESSLIST_ID IS NOT NULL AND PROCESSLIST_ID <> CONNECTION_ID()`);
-  // Un scheduler interno puede ejecutar escrituras: exigir que no haya eventos habilitados.
-  const eventos = await leer("SELECT COUNT(*) AS n FROM information_schema.EVENTS WHERE STATUS = 'ENABLED'");
-  const resultado = clasificarSesiones(filas, Number(eventos[0].n));
-  assert.equal(resultado.peligrosas.length, 0, 'Existen sesiones cliente o procesos no acreditados como internos');
-  const trx = await leer('SELECT COUNT(*) AS n FROM information_schema.INNODB_TRX WHERE trx_mysql_thread_id <> CONNECTION_ID()');
+// Sesiones, transacciones y bloqueos ajenos SIN el privilegio global PROCESS. Antes se usaba
+// information_schema.INNODB_TRX (exige PROCESS). performance_schema solo exige SELECT por tabla y NO filtra
+// filas por usuario. Para que «0 transacciones ajenas» signifique lo mismo que antes se exige (sin conceder
+// ni cambiar nada) que la instrumentación de transacciones esté activa y cubra a todos los hilos de cliente:
+// si no se puede observar, ALTO (nunca se da por buena una ausencia invisible).
+const SQL_HILOS = `SELECT THREAD_ID, NAME, TYPE, PROCESSLIST_ID, PROCESSLIST_USER,
+    PROCESSLIST_HOST, PROCESSLIST_DB, PROCESSLIST_COMMAND, CONNECTION_TYPE, INSTRUMENTED
+    FROM performance_schema.threads WHERE PROCESSLIST_ID IS NOT NULL AND PROCESSLIST_ID <> CONNECTION_ID()`;
+const SQL_INSTRUMENTACION = `SELECT
+    (SELECT ENABLED FROM performance_schema.setup_consumers WHERE NAME = 'events_transactions_current') AS consumidor,
+    (SELECT ENABLED FROM performance_schema.setup_instruments WHERE NAME = 'transaction') AS instrumento`;
+// Comparación NULL-safe: una fila con THREAD_ID NULL (p. ej. los bloqueos de una transacción XA preparada
+// y separada de su sesión) cuenta como AJENA. Con «THREAD_ID <> …» el resultado sería NULL y la fila se
+// excluiría. Limitación conocida: una XA preparada SIN bloqueos no aparece en ninguna de las dos tablas
+// (no tiene hilo); la cubre XA RECOVER en la atestación de root del lanzador, no esta suite.
+const SQL_TRX_AJENAS = "SELECT COUNT(*) AS n FROM performance_schema.events_transactions_current WHERE STATE = 'ACTIVE' AND NOT (THREAD_ID <=> PS_CURRENT_THREAD_ID())";
+const SQL_BLOQUEOS_AJENOS = 'SELECT COUNT(*) AS n FROM performance_schema.data_locks WHERE NOT (THREAD_ID <=> PS_CURRENT_THREAD_ID())';
+const SQL_EVENTOS = "SELECT COUNT(*) AS n FROM information_schema.EVENTS WHERE STATUS = 'ENABLED'";
+const SQL_PLANIFICADOR = "SELECT @@GLOBAL.event_scheduler AS planificador, @@server_uuid AS uuid, (SELECT COUNT(*) FROM information_schema.USER_PRIVILEGES WHERE PRIVILEGE_TYPE = 'EVENT') AS evento_global";
+const SQL_UPTIME = "SHOW GLOBAL STATUS LIKE 'Uptime'";
+const ATESTACION_MAX_S = 900;
+
+// Eventos habilitados que la cuenta puede DEMOSTRAR. Con EVENT global, information_schema.EVENTS los ve todos.
+// Sin él solo ve los de sus bases: si el planificador está ON hace falta una atestación de solo lectura hecha
+// con privilegios (PANSYS_ATESTACION_EVENTOS, la emite el lanzador justo antes de esta suite) del MISMO
+// servidor (server_uuid), del MISMO arranque (Uptime coherente), de hace como mucho 15 min y con 0 eventos.
+// Si no se puede demostrar devuelve NaN: clasificarSesiones no acredita entonces al scheduler (ALTO).
+const eventosDemostrables = async (leer, { atestacion, ahora }) => {
+  const [p] = await leer(SQL_PLANIFICADOR);
+  const visibles = Number((await leer(SQL_EVENTOS))[0].n);
+  if (Number(p.evento_global) > 0) return { n: visibles, fuente: 'privilegio EVENT global' };
+  if (p.planificador !== 'ON') return { n: visibles, fuente: `planificador ${p.planificador}` };
+  if (!atestacion) return { n: NaN, fuente: 'planificador ON sin atestación' };
+  let a;
+  try { a = JSON.parse(atestacion); } catch { return { n: NaN, fuente: 'atestación ilegible' }; }
+  const uptime = Number((await leer(SQL_UPTIME))[0].Value);
+  const edad = (ahora - Date.parse(a.emitida)) / 1000;
+  const valida = a.uuid === p.uuid && a.eventos === 0 && Number.isFinite(edad) && edad >= 0 && edad <= ATESTACION_MAX_S
+    && Number.isFinite(a.uptime) && uptime >= a.uptime + Math.floor(edad) - 2 && uptime <= a.uptime + Math.ceil(edad) + 2;
+  return valida ? { n: visibles, fuente: 'atestación' } : { n: NaN, fuente: 'atestación no válida' };
+};
+const comprobarSesiones = async (leer, { atestacion = process.env.PANSYS_ATESTACION_EVENTOS, ahora = Date.now() } = {}) => {
+  const filas = await leer(SQL_HILOS);
+  const [inst] = await leer(SQL_INSTRUMENTACION);
+  assert.ok(inst && inst.consumidor === 'YES' && inst.instrumento === 'YES', 'Instrumentación de transacciones desactivada: no se pueden demostrar transacciones ajenas');
+  assert.equal(filas.filter(f => f.INSTRUMENTED !== 'YES').length, 0, 'Hay hilos sin instrumentar: sus transacciones no serían visibles');
+  // Un scheduler interno puede ejecutar escrituras: exigir que se DEMUESTRE que no hay eventos habilitados.
+  const eventos = await eventosDemostrables(leer, { atestacion, ahora });
+  const resultado = clasificarSesiones(filas, eventos.n);
+  assert.equal(resultado.peligrosas.length, 0, `Existen sesiones cliente o procesos no acreditados como internos (eventos: ${eventos.fuente})`);
+  const trx = await leer(SQL_TRX_AJENAS);
   assert.equal(Number(trx[0].n), 0, 'Existen transacciones ajenas');
+  const bloqueos = await leer(SQL_BLOQUEOS_AJENOS);
+  assert.equal(Number(bloqueos[0].n), 0, 'Existen bloqueos ajenos');
   return resultado.internas.map(f => ({ id: f.PROCESSLIST_ID, nombre: f.NAME }));
 };
 
@@ -374,4 +418,4 @@ async function ejecutar(argv = process.argv.slice(2), env = process.env) {
   return manifiesto.estado === 'correcta' ? 0 : 1;
 }
 if (require.main === module) ejecutar().then(c => { process.exitCode = c; }).catch(e => { console.error(`E1e cancelada: ${e.code || e.message}`); process.exitCode = 1; });
-module.exports = { ESCENARIOS, validarInicio, esperarCondicion, clasificarSesiones, comprobarSesiones, carreraControlada, ejecutar };
+module.exports = { ESCENARIOS, validarInicio, esperarCondicion, clasificarSesiones, eventosDemostrables, comprobarSesiones, carreraControlada, ejecutar };

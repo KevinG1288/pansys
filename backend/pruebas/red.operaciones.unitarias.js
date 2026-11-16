@@ -1,6 +1,6 @@
 // Pruebas unitarias de la red colaborativa, etapa E1b (crear, rechazar y cancelar solicitudes):
 // - el SQL compartido con el protocolo validado en el ensayo E6 es IDÉNTICO al de referencia
-//   (pruebas/lib/operaciones.js del paquete C:\PansysEnsayo\trabajo\sql006; si existe, se compara con el
+//   (pruebas/lib/operaciones.js del paquete sql006 de ensayo, externo al repositorio; si existe, se compara con el
 //   archivo; las cadenas de referencia también están copiadas aquí);
 // - la secuencia de sentencias y el ORDEN DE BLOQUEOS (L1 pareja X -> L2 panaderías S -> L3 solicitudes
 //   -> L4 materias S) coinciden con crear y cerrarSinTransferir del protocolo, y toda sentencia va en la
@@ -53,7 +53,8 @@ const REFERENCIA = {
   INSERTAR_EVENTO_CIERRE: 'INSERT INTO eventos_red (solicitud_id, tipo, lado, panaderia_id, actor_id, createdAt) VALUES (?, ?, ?, ?, ?, NOW())',
   CONTADOR_MENOS: 'UPDATE red_parejas SET pendientes = pendientes - 1, updatedAt = NOW() WHERE panaderia_menor_id = ? AND panaderia_mayor_id = ?'
 };
-const RUTA_REFERENCIA = 'C:/PansysEnsayo/trabajo/sql006/pruebas/lib/operaciones.js';
+// Comparación opcional con el paquete de ensayo sql006 (fuera del repositorio): ruta en PANSYS_REFERENCIA_SQL006.
+const RUTA_REFERENCIA = process.env.PANSYS_REFERENCIA_SQL006 || null;
 
 const main = async () => {
   const { sequelize } = require('../src/models/index');
@@ -68,11 +69,11 @@ const main = async () => {
   // ---------- 1. SQL idéntico al protocolo validado
   console.log('\n== SQL del protocolo validado (E6)');
   for (const [k, ref] of Object.entries(REFERENCIA)) igual(`${k} idéntico a la referencia`, S[k], ref);
-  if (fs.existsSync(RUTA_REFERENCIA)) {
+  if (RUTA_REFERENCIA && fs.existsSync(RUTA_REFERENCIA)) {
     const texto = fs.readFileSync(RUTA_REFERENCIA, 'utf8');
     igual('las cadenas de referencia aparecen literalmente en operaciones.js del ensayo', Object.values(REFERENCIA).filter(r => !texto.includes(r)).length, 0);
   } else {
-    console.log(`AVISO no se encuentra ${RUTA_REFERENCIA}: se usan solo las cadenas copiadas`);
+    console.log(`AVISO ${RUTA_REFERENCIA ? `no se encuentra ${RUTA_REFERENCIA}` : "sin PANSYS_REFERENCIA_SQL006"}: se usan solo las cadenas copiadas`);
   }
   igual('INSERTAR_DETALLE y INSERTAR_SOLICITUD: mismas columnas que la referencia salvo id (AUTO_INCREMENT) y nota', [
     /^INSERT INTO solicitudes_red_detalle \(solicitud_id, linea, panaderia_solicitante_id, panaderia_proveedora_id, materia_prima_destino_id, materia_prima_origen_id, nombre_solicitado, unidad_medida, cantidad, createdAt, updatedAt\) VALUES \(\?, \?, \?, \?, \?, NULL, \?, \?, \?, NOW\(\), NOW\(\)\)$/.test(S.INSERTAR_DETALLE),

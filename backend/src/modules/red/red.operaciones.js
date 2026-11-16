@@ -7,7 +7,7 @@ const redConsultas = require('./red.consultas');
 
 // Escrituras de la red colaborativa (E1b: crear, rechazar y cancelar; E1c: aceptar con transferencia).
 // Siguen PASO A PASO el protocolo validado en el ensayo E6 (pruebas/lib/operaciones.js del paquete
-// C:\PansysEnsayo\trabajo\sql006, funciones crear y cerrarSinTransferir), con el mismo SQL y el mismo
+// sql006 de ensayo, externo al repositorio; funciones crear y cerrarSinTransferir), con el mismo SQL y el mismo
 // orden global de bloqueos:
 //   L1 red_parejas (X) -> L2 panaderias (S, por id) -> L3 solicitudes_red (S del rango de pendientes de la
 //   pareja; X de la fila) -> L4 materia_prima (S de los destinos, por id) -> L6 inserciones.

@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const { ErrorNegocio } = require('../../utils/errores');
 const { parsearEmail } = require('../../utils/email');
 const { validarContrasenaNueva } = require('../../utils/contrasenas');
@@ -59,8 +58,8 @@ const esperaLimite = (marcas, { maximo, ventanaMs }, ahora) =>
 const enEnvio = (enlace, ahora) => enlace?.estado === 'enviando'
   && new Date(enlace.createdAt).getTime() + RESERVA_MS + MARGEN_CONSULTA_MS > ahora;
 
-const claveIp = (ip) => `ip:${typeof ip === 'string' && ip ? ip.slice(0, 100) : 'desconocida'}`;
-const claveCorreo = (email) => `correo:${crypto.createHash('sha256').update(email.toLowerCase(), 'utf8').digest('hex')}`;
+// Claves compartidas con los límites de inicio de sesión (utils/limites.js, mismo comportamiento)
+const { claveIp, claveCorreo } = require('../../utils/limites');
 
 // Registro de errores sin datos sensibles: solo el nombre y el código del error
 const registroSeguro = (contexto, error) => {

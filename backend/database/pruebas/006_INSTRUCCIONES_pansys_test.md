@@ -15,7 +15,7 @@ de abajo necesita una autorización expresa e independiente.
 | `006_datos_demo_red_pansys_test.sql` | Datos de la demostración entre las panaderías 1 y 2 (una transacción) |
 
 Los dos primeros son **idénticos byte a byte** a la versión validada (fuente aprobada, revisión 3, sin
-su primera línea de guarda): es el mismo texto que se ejecutó en el ensayo aislado `pansysensayo005`
+su primera línea de guarda): es el mismo texto que se ejecutó en un ensayo aislado (base de pruebas independiente)
 (L1a 20261105T010135Z y L1b 20261105T010609Z, E6 44/44), con el nombre de la base cambiado.
 
 | Archivo | SHA-256 | Bytes |
@@ -60,8 +60,8 @@ Desde `cmd.exe` (la contraseña se teclea en el aviso; nunca en la orden):
 ```bat
 mysqldump --no-defaults --protocol=TCP --host=127.0.0.1 --port=3306 --user=pansys_test_admin --password ^
   --single-transaction --set-gtid-purged=OFF --routines --triggers --no-tablespaces --default-character-set=utf8mb4 ^
-  --result-file=C:\PansysRespaldos\pansys_test_pre_006_<UTC>.sql --log-error=C:\PansysRespaldos\pansys_test_pre_006_<UTC>.err pansys_test
-certutil -hashfile C:\PansysRespaldos\pansys_test_pre_006_<UTC>.sql SHA256
+  --result-file=<CARPETA_RESPALDOS>\pansys_test_pre_006_<UTC>.sql --log-error=<CARPETA_RESPALDOS>\pansys_test_pre_006_<UTC>.err pansys_test
+certutil -hashfile <CARPETA_RESPALDOS>\pansys_test_pre_006_<UTC>.sql SHA256
 ```
 
 Se acepta con código 0, `.err` vacío y la última línea `-- Dump completed on ...`. Guarde el SHA-256.
@@ -75,7 +75,7 @@ mysql --no-defaults --protocol=TCP --host=127.0.0.1 --port=3306 --user=pansys_te
   --database=pansys_test --skip-reconnect --table --show-warnings --default-character-set=utf8mb4 ^
   "--init-command=DO JSON_TYPE(IF(DATABASE() = 'pansys_test', '[]', 'ABORTAR: no es pansys_test'))" ^
   < backend\database\pruebas\006_red_colaborativa_pansys_test.sql ^
-  1> C:\PansysRespaldos\e0b_006_<UTC>.out 2> C:\PansysRespaldos\e0b_006_<UTC>.err
+  1> <CARPETA_RESPALDOS>\e0b_006_<UTC>.out 2> <CARPETA_RESPALDOS>\e0b_006_<UTC>.err
 echo %ERRORLEVEL%
 ```
 
@@ -120,7 +120,7 @@ mysql --no-defaults --protocol=TCP --host=127.0.0.1 --port=3306 --user=<cuenta_a
   "--execute=DROP DATABASE pansys_test; CREATE DATABASE pansys_test CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
 mysql --no-defaults --protocol=TCP --host=127.0.0.1 --port=3306 --user=<cuenta_admin> --password ^
   --database=pansys_test --skip-reconnect --default-character-set=utf8mb4 ^
-  < C:\PansysRespaldos\pansys_test_pre_006_<UTC>.sql
+  < <CARPETA_RESPALDOS>\pansys_test_pre_006_<UTC>.sql
 ```
 
 Compruebe antes el SHA-256 del respaldo y **revise dos veces que el nombre es `pansys_test`**.

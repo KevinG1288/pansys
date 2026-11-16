@@ -69,7 +69,9 @@ const main = async () => {
   console.log('\n== Base de producción (fase 1): --entorno=produccion + NODE_ENV=production + PANSYS_AUTORIZAR_BASE_PRODUCCION');
   const DES = { modoDemo: false, entorno: 'desarrollo', entornoCargado: true };
   const PRO = { modoDemo: false, entorno: 'produccion', entornoCargado: true };
-  const AUT = { NODE_ENV: 'production', PANSYS_AUTORIZAR_BASE_PRODUCCION: 'pansys_db' };
+  // Producción exige además un JWT_SECRET fuerte (I2): valor de prueba aleatorio, no un secreto real
+  const JWT_PRUEBA = 'Xq7mZ2vR9tL4wK8pN3bH6yJ1cF5dG0sA-pruebas-arranque';
+  const AUT = { NODE_ENV: 'production', PANSYS_AUTORIZAR_BASE_PRODUCCION: 'pansys_db', JWT_SECRET: JWT_PRUEBA };
   const mensajeDe = (fn) => { try { fn(); return null; } catch (e) { return e instanceof ErrorArranque ? e.message : `otro: ${e.name}`; } };
   igual('producción completa (argumento, NODE_ENV y autorización) -> se permite', lanza(() => validarConfiguracion({ DB_NAME: 'pansys_db', ...AUT }, PRO)), null);
   for (const [descripcion, env, opciones] of [
@@ -80,6 +82,8 @@ const main = async () => {
     ['desarrollo con pansys_db, NODE_ENV=production y autorización, pero sin --entorno=produccion', { DB_NAME: 'pansys_db', ...AUT }, DES],
     ['NODE_ENV=test con pansys_db (pruebas)', { DB_NAME: 'pansys_db', NODE_ENV: 'test' }, DES],
     ['producción sin PANSYS_AUTORIZAR_BASE_PRODUCCION', { DB_NAME: 'pansys_db', NODE_ENV: 'production' }, PRO],
+    ['producción completa sin JWT_SECRET', { DB_NAME: 'pansys_db', NODE_ENV: 'production', PANSYS_AUTORIZAR_BASE_PRODUCCION: 'pansys_db' }, PRO],
+    ['producción completa con el JWT_SECRET de .env.example', { DB_NAME: 'pansys_db', ...AUT, JWT_SECRET: 'genera_una_cadena_larga_y_aleatoria' }, PRO],
     ['producción con una autorización distinta', { DB_NAME: 'pansys_db', NODE_ENV: 'production', PANSYS_AUTORIZAR_BASE_PRODUCCION: 'si' }, PRO],
     ['--entorno=produccion sin NODE_ENV=production', { DB_NAME: 'pansys_db', PANSYS_AUTORIZAR_BASE_PRODUCCION: 'pansys_db' }, PRO],
     ['--entorno=produccion sin poder leer .env.produccion', { DB_NAME: 'pansys_db', ...AUT }, { ...PRO, entornoCargado: false }],
@@ -160,7 +164,7 @@ const main = async () => {
   }
   d = dobles({ base: 'pansys_db' });
   igual('producción completa: conecta y escucha',
-    [await intentar(iniciarServidor({ ...d, env: { DB_NAME: 'pansys_db', NODE_ENV: 'production', PANSYS_AUTORIZAR_BASE_PRODUCCION: 'pansys_db', PORT: '3999' },
+    [await intentar(iniciarServidor({ ...d, env: { DB_NAME: 'pansys_db', ...AUT, PORT: '3999' },
       opciones: { modoDemo: false, servirFrontend: false, entorno: 'produccion', entornoCargado: true } })), d.eventos],
     ['arrancó', ['conexion', 'listen:3999']]);
 

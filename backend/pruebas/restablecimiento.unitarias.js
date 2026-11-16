@@ -247,6 +247,104 @@ t += 1000; // vencen todas las entradas anteriores (la más reciente, de k1, cum
 const trasVencer = cap.intentar('k4');
 igual('al vencer entradas, la clave nueva ya cabe', [trasVencer.permitido, cap.tamano() <= 3], [true, true]);
 
+// ---------- Línea base de las tablas del SQL 005 (pruebas/lineabase005.js; datos FICTICIOS) ----------
+console.log('\n== Línea base de las tablas del SQL 005 (filas previas legítimas)');
+{
+  const lb = require('./lineabase005');
+  const lanzaLB = (fn) => { try { fn(); return false; } catch { return true; } };
+  const HASH_FICTICIO = 'a'.repeat(64);
+  const enlace = (id, o = {}) => ({ id, usuario_id: 2, origen: 'propio', solicitado_por: null, token_hash: HASH_FICTICIO, estado: 'usado', motivo: null,
+    intentos_fallidos: 0, expira_en: new Date('2026-11-13T18:54:17Z'), enviado_en: new Date('2026-11-13T18:24:17Z'), usado_en: new Date('2026-11-13T18:26:22Z'),
+    invalidado_en: null, fallido_en: null, createdAt: new Date('2026-11-13T18:24:17Z'), updatedAt: new Date('2026-11-13T18:26:22Z'), ...o });
+  const evento = (id, o = {}) => ({ id, tipo: 'restablecimiento_usado', usuario_id: 2, panaderia_id: 1, actor_id: null, restablecimiento_id: 89, detalle: null, createdAt: new Date('2026-11-13T18:26:22Z'), ...o });
+  const previas = () => ({ restablecimientos: [enlace(88, { estado: 'invalidado', motivo: 'nuevo_enlace', invalidado_en: new Date('2026-11-13T18:24:17Z'), usado_en: null }), enlace(89)],
+    eventos: [221, 222, 223, 224, 225, 226].map(id => evento(id)) });
+  const inerte = (id, o = {}) => ({ id, estado: 'usado', caducado: 1, cuenta_prueba: 0, ...o });
+
+  // Línea base vacía: comportamiento anterior conservado
+  const vacia = lb.construirLineaBase({ restablecimientos: [], eventos: [] });
+  igual('línea base vacía: válida, ids para SQL [0] y coincide con tablas vacías',
+    [lb.validarLineaBase({ restablecimientos: [], eventos: [] }), lb.idsParaSql(vacia, 'restablecimientos'), lb.compararConLineaBase(vacia, { restablecimientos: [], eventos: [] }).ok], [[], [0], true]);
+  igual('línea base vacía: cualquier fila después es «sobra»', lb.compararConLineaBase(vacia, { restablecimientos: [enlace(90)], eventos: [] }).restablecimientos.sobran, [90]);
+
+  // Filas terminales y caducadas (el caso real: 2 enlaces y 6 eventos del usuario 2)
+  igual('enlaces usado/invalidado/envio_fallido caducados y eventos de cuentas no de prueba: válidos',
+    lb.validarLineaBase({ restablecimientos: [inerte(88, { estado: 'invalidado' }), inerte(89), inerte(90, { estado: 'envio_fallido' })], eventos: [{ id: 221, cuenta_prueba: 0 }] }), []);
+  const base = lb.construirLineaBase(previas());
+  igual('línea base de 2 enlaces y 6 eventos; ids para SQL', [Object.keys(base.restablecimientos).length, Object.keys(base.eventos).length, lb.idsParaSql(base, 'restablecimientos'), lb.idsParaSql(base, 'eventos')],
+    [2, 6, [88, 89], [221, 222, 223, 224, 225, 226]]);
+  igual('mismas filas (otro orden de filas y de columnas): idénticas', lb.compararConLineaBase(base, {
+    restablecimientos: previas().restablecimientos.reverse().map(f => Object.fromEntries(Object.entries(f).reverse())), eventos: previas().eventos }).ok, true);
+
+  // Enlaces no inertes o residuos de prueba: ALTO
+  for (const [d, r] of [['activo', inerte(5, { estado: 'activo' })], ['enviando', inerte(5, { estado: 'enviando' })], ['sin caducar', inerte(5, { caducado: 0 })],
+    ['caducidad desconocida (NULL)', inerte(5, { caducado: null })], ['de una cuenta prueba.*', inerte(5, { cuenta_prueba: 1 })], ['estado desconocido', inerte(5, { estado: 'otro' })]]) {
+    igual(`enlace previo ${d}: ALTO`, lb.validarLineaBase({ restablecimientos: [r], eventos: [] }).length > 0, true);
+  }
+  igual('evento previo de una cuenta prueba.*: ALTO', lb.validarLineaBase({ restablecimientos: [], eventos: [{ id: 7, cuenta_prueba: 1 }] }).length, 1);
+
+  // Comparación final exacta
+  const cambia = (f) => { const p = previas(); f(p); return lb.compararConLineaBase(base, p); };
+  igual('fila previa eliminada -> faltan', cambia(p => { p.restablecimientos.pop(); }).restablecimientos.faltan, [89]);
+  igual('evento previo eliminado -> faltan', cambia(p => { p.eventos.shift(); }).eventos.faltan, [221]);
+  igual('fila previa modificada (estado) -> cambiadas', cambia(p => { p.restablecimientos[1].estado = 'invalidado'; }).restablecimientos.cambiadas, [89]);
+  igual('fila previa modificada (fecha, 1 s) -> cambiadas', cambia(p => { p.restablecimientos[1].usado_en = new Date('2026-11-13T18:26:23Z'); }).restablecimientos.cambiadas, [89]);
+  igual('fila previa modificada (token_hash, un carácter) -> cambiadas', cambia(p => { p.restablecimientos[0].token_hash = 'b' + HASH_FICTICIO.slice(1); }).restablecimientos.cambiadas, [88]);
+  igual('fila previa modificada (NULL -> valor) -> cambiadas', cambia(p => { p.eventos[2].actor_id = 5; }).eventos.cambiadas, [223]);
+  igual('fila adicional de una cuenta ajena -> sobran', cambia(p => { p.restablecimientos.push(enlace(95, { usuario_id: 3 })); }).restablecimientos.sobran, [95]);
+  igual('fila propia sin limpiar -> sobran', cambia(p => { p.eventos.push(evento(300, { usuario_id: 400 })); }).eventos.sobran, [300]);
+  const dif = lb.describirDiferencias(cambia(p => { p.restablecimientos[0].token_hash = 'b' + HASH_FICTICIO.slice(1); p.eventos.pop(); }));
+  igual('las diferencias solo nombran ids (nunca valores como el token_hash)', [dif, dif.join(' ').includes(HASH_FICTICIO.slice(0, 10))], [['restablecimientos: cambiaron 88', 'eventos: faltan 226'], false]);
+
+  // Representación determinista: tipos distinguidos
+  const h = (v) => lb.huellaFila({ id: 1, c: v });
+  igual('NULL ≠ "null", fecha ≠ su texto ISO, Buffer ≠ su hex, 1 ≠ "1", true ≠ 1', [h(null) !== h('null'), h(new Date('2026-01-01T00:00:00Z')) !== h('2026-01-01T00:00:00.000Z'),
+    h(Buffer.from('ab')) !== h('6162'), h(1) !== h('1'), h(true) !== h(1)], [true, true, true, true, true]);
+  igual('determinista: -0 = 0, objetos JSON con claves en otro orden = iguales, fecha inválida marcada', [h(-0) === h(0), h({ a: 1, b: 2 }) === h({ b: 2, a: 1 }), h(new Date('x')) !== h(null)], [true, true, true]);
+  igual('huella SHA-256 (64 hex)', /^[0-9a-f]{64}$/.test(h('x')), true);
+  igual('id repetido, id no válido o tipo no admitido -> error', [lanzaLB(() => lb.construirLineaBase({ restablecimientos: [enlace(1), enlace(1)], eventos: [] })),
+    lanzaLB(() => lb.construirLineaBase({ restablecimientos: [enlace(0)], eventos: [] })), lanzaLB(() => h(() => 1))], [true, true, true]);
+
+  // La suite usa la línea base (comprobación estática del código)
+  const suite = require('fs').readFileSync(require('path').join(__dirname, 'restablecimiento.pruebas.js'), 'utf8');
+  igual('suite: ya no exige tablas del SQL 005 vacías', /filas antes de empezar \(ajenas a esta ejecución\)/.test(suite), false);
+  igual('suite: valida la línea base antes de iniciarEjecucion (antes de cualquier escritura)', suite.indexOf('validarLineaBase(estadoPrevio)') > 0 && suite.indexOf('validarLineaBase(estadoPrevio)') < suite.indexOf('ejecucion = await iniciarEjecucion'), true);
+  igual('suite: antes de limpiar excluye SOLO los ids de la línea base', (suite.match(/WHERE id NOT IN \(\?\) AND \(usuario_id NOT IN \(\?\)/g) || []).length, 2);
+  igual('suite: después de limpiar compara exactamente con la línea base', /compararConLineaBase\(lineaBase005, await capturarTablas005\(\)\)/.test(suite), true);
+  igual('suite: la línea base no añade escrituras sobre las tablas del SQL 005', /(DELETE FROM|UPDATE|INSERT INTO) pansys_test\.(restablecimientos_contrasena|eventos_seguridad)[^']*'[^)]*lineaBase/.test(suite), false);
+
+  // ---------- Sondas de restricciones: errores admitidos y estructura de fk_evento_usuario ----------
+  console.log('\n== Sondas de restricciones del SQL 005');
+  igual('FK: errores admitidos exactamente 1452 y 1216', [...lb.ERRNO_FK_EVENTO_USUARIO], [1452, 1216]);
+  igual('FK: acepta 1452 y 1216', [lb.errnoAceptado(1452, lb.ERRNO_FK_EVENTO_USUARIO), lb.errnoAceptado(1216, lb.ERRNO_FK_EVENTO_USUARIO)], [true, true]);
+  igual('FK: rechaza otros códigos (1451, 1062, 3819, 1142, 1205, null, "1452")',
+    [1451, 1062, 3819, 1142, 1205, null, '1452'].map(n => lb.errnoAceptado(n, lb.ERRNO_FK_EVENTO_USUARIO)), Array(7).fill(false));
+  igual('código exacto (compatibilidad): CHECK 3819 y UNIQUE 1062 solo con su código',
+    [lb.errnoAceptado(3819, 3819), lb.errnoAceptado(1216, 3819), lb.errnoAceptado(1062, 1062), lb.errnoAceptado(1452, 1062)], [true, false, true, false]);
+  igual('lista de errores vacía o no válida -> error (nunca acepta por omisión)', [lanzaLB(() => lb.errnoAceptado(1452, [])), lanzaLB(() => lb.errnoAceptado(1452, ['1452'])), lanzaLB(() => lb.errnoAceptado(1452, undefined))], [true, true, true]);
+  const kcuOk = { TABLE_SCHEMA: 'pansys_test', TABLE_NAME: 'eventos_seguridad', COLUMN_NAME: 'usuario_id', REFERENCED_TABLE_SCHEMA: 'pansys_test', REFERENCED_TABLE_NAME: 'usuarios', REFERENCED_COLUMN_NAME: 'id' };
+  const rcOk = { CONSTRAINT_SCHEMA: 'pansys_test', TABLE_NAME: 'eventos_seguridad', REFERENCED_TABLE_NAME: 'usuarios' };
+  igual('fk_evento_usuario con su estructura exacta -> válida', lb.validarFkEventoUsuario([kcuOk], [rcOk]), []);
+  for (const [d, kcu, rc] of [
+    ['inexistente', [], []],
+    ['en otra tabla', [{ ...kcuOk, TABLE_NAME: 'restablecimientos_contrasena' }], [{ ...rcOk, TABLE_NAME: 'restablecimientos_contrasena' }]],
+    ['que referencia otra tabla', [{ ...kcuOk, REFERENCED_TABLE_NAME: 'panaderias' }], [{ ...rcOk, REFERENCED_TABLE_NAME: 'panaderias' }]],
+    ['sobre otra columna (actor_id)', [{ ...kcuOk, COLUMN_NAME: 'actor_id' }], [rcOk]],
+    ['hacia otra columna padre', [{ ...kcuOk, REFERENCED_COLUMN_NAME: 'rol_id' }], [rcOk]],
+    ['en otro esquema', [{ ...kcuOk, TABLE_SCHEMA: 'pansys_db', REFERENCED_TABLE_SCHEMA: 'pansys_db' }], [{ ...rcOk, CONSTRAINT_SCHEMA: 'pansys_db' }]],
+    ['compuesta (2 columnas)', [kcuOk, { ...kcuOk, COLUMN_NAME: 'panaderia_id' }], [rcOk]],
+    ['sin restricción referencial', [kcuOk], []]
+  ]) igual(`fk_evento_usuario ${d} -> la sonda NO se acepta`, lb.validarFkEventoUsuario(kcu, rc).length > 0, true);
+  // La suite usa todo lo anterior (comprobación estática del código)
+  igual('suite: la sonda FK admite ERRNO_FK_EVENTO_USUARIO y verifica la FK antes de aceptar',
+    /\[ID_INEXISTENTE\], ERRNO_FK_EVENTO_USUARIO, \{ antesDeAceptar: comprobarFkEventoUsuario \}\)/.test(suite), true);
+  igual('suite: la comprobación de la FK lee KEY_COLUMN_USAGE y REFERENTIAL_CONSTRAINTS de pansys_test',
+    [/information_schema\.KEY_COLUMN_USAGE WHERE CONSTRAINT_SCHEMA = 'pansys_test' AND CONSTRAINT_NAME = 'fk_evento_usuario'/.test(suite), /information_schema\.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = 'pansys_test' AND CONSTRAINT_NAME = 'fk_evento_usuario'/.test(suite)], [true, true]);
+  igual('suite: CHECK sigue con 3819 y UNIQUE con 1062 exactos', [/sonda check`\], 3819\);/.test(suite), /sonda unique`\], 1062\);/.test(suite)], [true, true]);
+  igual('suite: se conserva la comprobación de que las sondas no dejan filas', /igual\('las sondas no dejaron filas'/.test(suite), true);
+  igual('suite: sonda usa errnoAceptado (no la igualdad estricta anterior)', [/let ok = errnoAceptado\(errno, errnoEsperado\)/.test(suite), /registrar\(errno === errnoEsperado/.test(suite)], [true, false]);
+}
+
 // ---------- Sin temporizadores ni esperas reales ----------
 console.log('\n== Sin temporizadores');
 igual('ningún módulo creó temporizadores (no mantienen vivo el proceso)', temporizadoresCreados, []);

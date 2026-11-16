@@ -12,11 +12,17 @@ const produccionRoutes = require('./modules/produccion/produccion.routes');
 const usuariosRoutes = require('./modules/usuarios/usuarios.routes');
 const panaderiasRoutes = require('./modules/panaderias/panaderias.routes');
 const redRoutes = require('./modules/red/red.routes');
+const { configurarSeguridad } = require('./config/seguridad');
+const { rutaApiNoEncontrada, manejadorFinalDeErrores } = require('./middlewares/errores.middleware');
 
 // PANSYS_MODO_DEMO y PANSYS_SERVIR_FRONTEND (ver config/arranque.js y DEMO.md)
 const opciones = leerOpciones();
 
 const app = express();
+
+// Sin X-Powered-By y con 'trust proxy' = 'loopback' (ver config/seguridad.js: el puerto del backend
+// no debe quedar expuesto públicamente, solo el proxy local)
+configurarSeguridad(app);
 
 app.use(cors({ origin: 'http://localhost:3001', credentials: true }));
 app.use(express.json());
@@ -41,7 +47,13 @@ if (opciones.servirFrontend) {
 // Solo se verifica la conexión: el esquema lo definen los scripts de backend/database
 // (sync() crearía tablas sin los CHECK ni las claves foráneas de esos scripts).
 // En modo demo, además, se comprueba que la base sea pansys_test antes de aceptar peticiones.
-iniciarServidor({ app, sequelize, opciones })
+// Al final de todo (justo antes de listen): 404 en JSON para /api y manejador final de errores
+const montarFinales = (aplicacion) => {
+  aplicacion.use('/api', rutaApiNoEncontrada);
+  aplicacion.use(manejadorFinalDeErrores);
+};
+
+iniciarServidor({ app, sequelize, opciones, montarFinales })
   .then(() => {
     console.log(`Entorno: ${entorno.nombre} (${entorno.archivo})`);
     // Modo de correo sin secretos (ya validado antes de conectar, en config/arranque.js)
