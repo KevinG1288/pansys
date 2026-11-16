@@ -55,11 +55,31 @@ const motivoSecretoJwtDebil = (valor) => {
   return null;
 };
 
+// Dirección de escucha HTTP (PANSYS_HOST). En producción el servidor está detrás de Caddy y solo
+// debe aceptar conexiones locales: se admite únicamente una dirección de bucle local y, sin
+// PANSYS_HOST (o vacía), se usa 127.0.0.1. Así el puerto no queda expuesto aunque falte el
+// firewall, sin restringir las conexiones salientes (SMTP). Fuera de producción, sin PANSYS_HOST
+// se mantiene el comportamiento anterior: undefined -> app.listen(PORT) en todas las interfaces
+// (demo en la red local); si se define, se usa tal cual.
+const HOSTS_LOCALES = Object.freeze(['127.0.0.1', '::1', 'localhost']);
+const HOST_PRODUCCION = '127.0.0.1';
+const resolverHost = (env, opciones) => {
+  const valor = env.PANSYS_HOST;
+  const definido = valor !== undefined && valor !== '';
+  if (opciones.entorno !== 'produccion') return definido ? valor : undefined;
+  if (!definido) return HOST_PRODUCCION;
+  if (!HOSTS_LOCALES.includes(valor)) {
+    throw new ErrorArranque(`Producción: PANSYS_HOST solo admite ${HOSTS_LOCALES.join(', ')} (el servidor escucha en local, detrás del proxy). El servidor no arranca.`);
+  }
+  return valor;
+};
+
 // Antes de conectar (primer paso de iniciarServidor):
 //  1. Producción: la base de producción exige, A LA VEZ, --entorno=produccion (solo por argumento),
 //     NODE_ENV=production y PANSYS_AUTORIZAR_BASE_PRODUCCION=pansys_db, y nunca el modo demo. Una
 //     combinación parcial o incoherente detiene el arranque. Con --entorno=produccion, además, un
-//     JWT_SECRET ausente o débil detiene el arranque (motivoSecretoJwtDebil).
+//     JWT_SECRET ausente o débil detiene el arranque (motivoSecretoJwtDebil), y también un
+//     PANSYS_HOST que no sea de bucle local (resolverHost).
 //  2. Correo: una configuración inválida o no autorizada (p. ej. SMTP real fuera de producción sin
 //     PANSYS_PERMITIR_SMTP_REAL=1 y destinos) detiene el arranque. El mensaje solo usa los textos de
 //     correo.js, que nunca incluyen valores; cualquier otro error se resume sin detalles.
@@ -73,6 +93,7 @@ const validarConfiguracion = (env, opciones) => {
     if (opciones.modoDemo) throw new ErrorArranque('El modo demo no se admite con --entorno=produccion. El servidor no arranca.');
     const motivoJwt = motivoSecretoJwtDebil(env.JWT_SECRET);
     if (motivoJwt) throw new ErrorArranque(`Producción: ${motivoJwt}. Genérelo con un generador criptográficamente seguro (ver .env.example). El servidor no arranca.`);
+    resolverHost(env, opciones);
   } else if (env.NODE_ENV === 'production') {
     throw new ErrorArranque('NODE_ENV=production solo se admite con --entorno=produccion (npm run start:produccion). El servidor no arranca.');
   }
@@ -147,13 +168,16 @@ const iniciarServidor = async ({ app, sequelize, env = process.env, opciones = l
   await sequelize.authenticate();
   await verificarBaseConectada(sequelize, opciones);
   if (typeof montarFinales === 'function') montarFinales(app);
+  const host = resolverHost(env, opciones);
   return new Promise((resolve, reject) => {
-    const servidor = app.listen(env.PORT, () => resolve(servidor));
+    const alEscuchar = () => resolve(servidor);
+    // Sin host (fuera de producción y sin PANSYS_HOST): exactamente la llamada anterior
+    const servidor = host === undefined ? app.listen(env.PORT, alEscuchar) : app.listen(env.PORT, host, alEscuchar);
     servidor.on('error', reject);
   });
 };
 
 module.exports = {
   BASE_DEMO, BASE_PRODUCCION, ErrorArranque, leerOpciones, validarConfiguracion, motivoSecretoJwtDebil, comprobarBuild,
-  verificarBaseConectada, montarFrontend, iniciarServidor
+  verificarBaseConectada, montarFrontend, iniciarServidor, resolverHost, HOSTS_LOCALES, HOST_PRODUCCION
 };

@@ -4,8 +4,9 @@
 // NODE_ENV=production y PANSYS_AUTORIZAR_BASE_PRODUCCION, y el correo validado antes de conectar.
 // La prueba final carga el app.js real en modo demo con DB_NAME=pansys_db y comprueba que el
 // arranque se cancela ANTES de intentar conectar.
-// OJO: levanta dos servidores HTTP DENTRO de este proceso, solo en 127.0.0.1 y en un puerto libre
-// (una app Express de prueba y el app.js real sin base de datos), y los cierra al terminar.
+// OJO: levanta tres servidores HTTP DENTRO de este proceso, solo en 127.0.0.1 y en un puerto libre
+// (el arranque de producción con PANSYS_HOST por defecto, una app Express de prueba y el app.js
+// real sin base de datos), y los cierra al terminar.
 //
 // Uso (desde backend/):  node pruebas/arranque.unitarias.js
 
@@ -17,7 +18,8 @@ const os = require('os');
 const path = require('path');
 const express = require('express');
 const {
-  BASE_DEMO, ErrorArranque, leerOpciones, validarConfiguracion, comprobarBuild, montarFrontend, iniciarServidor
+  BASE_DEMO, ErrorArranque, leerOpciones, validarConfiguracion, comprobarBuild, montarFrontend, iniciarServidor,
+  resolverHost, HOSTS_LOCALES, HOST_PRODUCCION
 } = require('../src/config/arranque');
 
 const resultados = [];
@@ -36,8 +38,10 @@ const dobles = ({ base = BASE_DEMO, fallaConexion = false, fallaConsulta = false
     query: async (sql) => { eventos.push(`consulta:${sql}`); if (fallaConsulta) throw new Error('consulta fallida'); return [[{ base }]]; }
   };
   const app = {
-    listen: (puerto, alEscuchar) => {
-      eventos.push(`listen:${puerto}`);
+    // listen(puerto, alEscuchar) o listen(puerto, host, alEscuchar): registra el host solo si se pasa
+    listen: (puerto, ...resto) => {
+      const alEscuchar = resto.pop();
+      eventos.push(resto.length ? `listen:${puerto}@${resto[0]}` : `listen:${puerto}`);
       const servidor = { on: () => servidor };
       setImmediate(alEscuchar);
       return servidor;
@@ -163,10 +167,60 @@ const main = async () => {
     igual(`${descripcion}: se cancela sin llamar a sequelize.authenticate() ni escuchar`, [r.startsWith('cancelado'), d.eventos], [true, []]);
   }
   d = dobles({ base: 'pansys_db' });
-  igual('producción completa: conecta y escucha',
+  igual('producción completa: conecta y escucha SOLO en 127.0.0.1 (PANSYS_HOST por defecto)',
     [await intentar(iniciarServidor({ ...d, env: { DB_NAME: 'pansys_db', ...AUT, PORT: '3999' },
       opciones: { modoDemo: false, servirFrontend: false, entorno: 'produccion', entornoCargado: true } })), d.eventos],
-    ['arrancó', ['conexion', 'listen:3999']]);
+    ['arrancó', ['conexion', 'listen:3999@127.0.0.1']]);
+
+  // ---------- Dirección de escucha (PANSYS_HOST) ----------
+  console.log('\n== Dirección de escucha (PANSYS_HOST)');
+  const PRO_H = { modoDemo: false, servirFrontend: false, entorno: 'produccion', entornoCargado: true };
+  const DES_H = { modoDemo: false, servirFrontend: false, entorno: 'desarrollo', entornoCargado: true };
+  igual('constantes: hosts locales y valor por defecto de producción', [HOSTS_LOCALES, HOST_PRODUCCION], [['127.0.0.1', '::1', 'localhost'], '127.0.0.1']);
+  igual('producción sin PANSYS_HOST -> 127.0.0.1', resolverHost({}, PRO_H), '127.0.0.1');
+  igual('producción con PANSYS_HOST vacía (PANSYS_HOST= en el archivo) -> 127.0.0.1', resolverHost({ PANSYS_HOST: '' }, PRO_H), '127.0.0.1');
+  for (const h of ['127.0.0.1', '::1', 'localhost']) igual(`producción con PANSYS_HOST=${h} -> se admite`, resolverHost({ PANSYS_HOST: h }, PRO_H), h);
+  for (const h of ['0.0.0.0', '::', '*', '203.0.113.10', '10.0.0.5', '127.0.0.2', '::ffff:127.0.0.1', 'LOCALHOST', ' 127.0.0.1', '127.0.0.1 ', 'localhost.', 'pansys.ejemplo.invalid']) {
+    igual(`producción con PANSYS_HOST=${JSON.stringify(h)} -> se rechaza`, lanza(() => resolverHost({ PANSYS_HOST: h }, PRO_H)), 'ErrorArranque');
+  }
+  igual('producción completa con PANSYS_HOST=0.0.0.0 -> validarConfiguracion la rechaza antes de conectar',
+    lanza(() => validarConfiguracion({ DB_NAME: 'pansys_db', ...AUT, PANSYS_HOST: '0.0.0.0' }, PRO)), 'ErrorArranque');
+  const msjHost = mensajeDe(() => validarConfiguracion({ DB_NAME: 'pansys_db', ...AUT, PANSYS_HOST: 'host-centinela.ejemplo' }, PRO));
+  igual('el mensaje de rechazo nombra la variable y no repite el valor recibido',
+    [String(msjHost).includes('PANSYS_HOST'), String(msjHost).includes('host-centinela')], [true, false]);
+  igual('producción completa con PANSYS_HOST=::1 -> se permite', lanza(() => validarConfiguracion({ DB_NAME: 'pansys_db', ...AUT, PANSYS_HOST: '::1' }, PRO)), null);
+  igual('desarrollo sin PANSYS_HOST -> undefined (todas las interfaces, como antes)', resolverHost({}, DES_H), undefined);
+  igual('desarrollo con PANSYS_HOST vacía -> undefined (como antes)', resolverHost({ PANSYS_HOST: '' }, DES_H), undefined);
+  igual('modo demo sin PANSYS_HOST -> undefined (como antes)', resolverHost({}, { ...DES_H, modoDemo: true }), undefined);
+  igual('opciones sin entorno (como antes) -> undefined', resolverHost({}, { modoDemo: false }), undefined);
+  igual('desarrollo con PANSYS_HOST=0.0.0.0 -> se usa tal cual (opcional, sin validar)', resolverHost({ PANSYS_HOST: '0.0.0.0' }, DES_H), '0.0.0.0');
+  igual('desarrollo con PANSYS_HOST=0.0.0.0 -> validarConfiguracion no lo rechaza', lanza(() => validarConfiguracion({ DB_NAME: 'pansys_test', PANSYS_HOST: '0.0.0.0' }, DES)), null);
+
+  d = dobles({ base: 'pansys_db' });
+  igual('arranque en producción con PANSYS_HOST=0.0.0.0: se cancela sin conectar ni escuchar',
+    [(await intentar(iniciarServidor({ ...d, env: { DB_NAME: 'pansys_db', ...AUT, PANSYS_HOST: '0.0.0.0', PORT: '3999' }, opciones: PRO_H }))).startsWith('cancelado'), d.eventos], [true, []]);
+  d = dobles({ base: 'pansys_db' });
+  igual('arranque en producción con PANSYS_HOST=::1: escucha en ::1',
+    [await intentar(iniciarServidor({ ...d, env: { DB_NAME: 'pansys_db', ...AUT, PANSYS_HOST: '::1', PORT: '3999' }, opciones: PRO_H })), d.eventos],
+    ['arrancó', ['conexion', 'listen:3999@::1']]);
+  d = dobles();
+  igual('arranque en desarrollo sin PANSYS_HOST: listen(PORT, cb) sin host, exactamente como antes',
+    [await intentar(iniciarServidor({ ...d, env: { DB_NAME: 'pansys_test', PORT: '3999' }, opciones: DES_H })), d.eventos], ['arrancó', ['conexion', 'listen:3999']]);
+  d = dobles();
+  igual('arranque en desarrollo con PANSYS_HOST=127.0.0.1: lo usa',
+    [await intentar(iniciarServidor({ ...d, env: { DB_NAME: 'pansys_test', PANSYS_HOST: '127.0.0.1', PORT: '3999' }, opciones: DES_H })), d.eventos], ['arrancó', ['conexion', 'listen:3999@127.0.0.1']]);
+
+  // Socket real: producción sin PANSYS_HOST queda enlazada a 127.0.0.1 (puerto libre del sistema)
+  const appHost = express();
+  const servidorProd = await iniciarServidor({
+    app: appHost, sequelize: { authenticate: async () => {}, query: async () => [[{ base: 'pansys_db' }]] },
+    env: { DB_NAME: 'pansys_db', ...AUT, PORT: '0' }, opciones: PRO_H
+  });
+  try {
+    igual('socket real en producción: dirección de escucha 127.0.0.1', [servidorProd.address().address, servidorProd.address().family], ['127.0.0.1', 'IPv4']);
+  } finally {
+    await new Promise(resolve => servidorProd.close(resolve));
+  }
 
   d = dobles();
   igual('servir frontend sin build: se cancela antes de conectar',
