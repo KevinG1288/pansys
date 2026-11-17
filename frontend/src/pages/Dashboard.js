@@ -13,9 +13,10 @@ import Topbar from '../components/layout/Topbar';
 import MenuMovil from '../components/layout/MenuMovil';
 import { etiquetaModulo } from '../components/layout/navegacion';
 import Colaboracion from './Colaboracion';
+import Aviso from '../components/ui/Aviso';
 
 const Dashboard = () => {
-  const { usuario, logout } = useAuth();
+  const { usuario, logout, avisoCambioSesion, cerrarAvisoCambioSesion } = useAuth();
   const navigate = useNavigate();
   const [moduloActivo, setModuloActivo] = useState('dashboard');
   const [menuAbierto, setMenuAbierto] = useState(false);
@@ -53,6 +54,11 @@ const Dashboard = () => {
             onAbrirMenu={() => setMenuAbierto(true)}
           />
           <main className="flex flex-1 flex-col">
+            {avisoCambioSesion && (
+              <div className="px-4 pt-6 md:px-6 lg:px-8">
+                <Aviso tipo="info" titulo="Cuenta activa cambiada" onCerrar={cerrarAvisoCambioSesion} className="mx-auto max-w-7xl">{avisoCambioSesion}</Aviso>
+              </div>
+            )}
             {renderContenido()}
           </main>
         </div>

@@ -1,13 +1,14 @@
 import axios from 'axios';
-import { notificarErrorDeAutenticacion } from '../lib/sesion';
+import { notificarErrorDeAutenticacion, tokenParaPeticion } from '../lib/sesion';
 
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL
 });
 
-// Agregar token a cada petición automáticamente
+// Agrega el token de ESTA pestaña. Si otra pestaña cambió de cuenta o cerró la sesión, la petición
+// no sale (tokenParaPeticion lanza un error que llega a quien llamó) y la pestaña se sincroniza.
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token');
+  const token = tokenParaPeticion();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }

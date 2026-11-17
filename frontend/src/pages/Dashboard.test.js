@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AuthProvider } from '../context/AuthContext';
 import api from '../services/api';
@@ -168,6 +168,36 @@ describe('Estructura y navegación', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Inventario de insumos' })).toBeInTheDocument();
     expect(within(menuEscritorio()).getByRole('button', { name: 'Inventario' })).toHaveAttribute('aria-current', 'page');
     await screen.findByRole('row', { name: /Harina/ });
+  });
+});
+
+describe('Cambio de cuenta desde otra pestaña (AuthContext real)', () => {
+  test('vuelve a la portada, cierra el menú y avisa de la cuenta activa', async () => {
+    await renderizarDashboard(PANADERO);
+    userEvent.click(within(menuEscritorio()).getByRole('button', { name: 'Recetas' }));
+    expect(screen.getByRole('heading', { level: 1, name: 'Recetas' })).toBeInTheDocument();
+    abrirMenuMovil();
+
+    // Otra pestaña inicia sesión con otra cuenta: escribe la sesión y el navegador avisa (storage)
+    localStorage.setItem('usuario', JSON.stringify(ADMIN));
+    localStorage.setItem('token', 'token-de-otra-cuenta');
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'token', newValue: 'token-de-otra-cuenta', storageArea: localStorage })); });
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(within(menuEscritorio()).getByRole('button', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'page');
+    expect(within(screen.getByRole('banner')).getByText('admin@pansys.com')).toBeInTheDocument();
+    const aviso = screen.getByText(/La sesión cambió en otra pestaña/).closest('[role="status"]');
+    expect(aviso).toHaveTextContent('Cuenta activa cambiada');
+    await screen.findByRole('list', { name: 'Insumos con alerta' });
+    userEvent.click(within(aviso).getByRole('button', { name: 'Cerrar aviso' }));
+    expect(screen.queryByText(/La sesión cambió en otra pestaña/)).not.toBeInTheDocument();
+  });
+
+  test('si la otra pestaña cierra la sesión, el Dashboard deja de mostrar al usuario', async () => {
+    await renderizarDashboard(PANADERO);
+    localStorage.clear();
+    act(() => { window.dispatchEvent(new StorageEvent('storage', { key: null, storageArea: localStorage })); });
+    expect(within(screen.getByRole('banner')).queryByText('panadero@pansys.com')).not.toBeInTheDocument();
   });
 });
 

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import App from './App';
 import api from './services/api';
 
@@ -15,10 +15,10 @@ jest.mock('react-router-dom', () => {
   return jest.requireActual('react-router');
 });
 
-// Sin red: las rutas probadas solo usan api.post (/restablecer valida el enlace al montarse).
+// Sin red: /restablecer usa api.post (valida el enlace al montarse) y el Dashboard, api.get.
 jest.mock('./services/api', () => ({
   __esModule: true,
-  default: { post: jest.fn() }
+  default: { post: jest.fn(), get: jest.fn() }
 }));
 
 const TOKEN = 'Q'.repeat(20) + '-_' + 'z'.repeat(21); // 43 caracteres base64url
@@ -66,4 +66,20 @@ test('/restablecer#token= es pública: lee el token antes de cualquier redirecci
   expect(await screen.findByLabelText('Contraseña nueva')).toBeInTheDocument();
   expect(api.post).toHaveBeenCalledWith(URL_VALIDAR, { token: TOKEN });
   expect(window.location.hash).toBe('');
+});
+
+test('/dashboard con sesión: si otra pestaña cierra la sesión, la ruta privada vuelve a /login', async () => {
+  localStorage.setItem('usuario', JSON.stringify({ id: 2, email: 'panadero@pansys.com', rol: 'panadero', rol_id: 2, panaderia_id: 1 }));
+  localStorage.setItem('token', 'token-de-prueba');
+  api.get.mockResolvedValue({ data: [] });
+  abrir('/dashboard');
+  expect(window.location.pathname).toBe('/dashboard');
+  expect(await screen.findByRole('button', { name: 'Cerrar sesión' })).toBeInTheDocument();
+
+  localStorage.clear();
+  act(() => { window.dispatchEvent(new StorageEvent('storage', { key: null, storageArea: localStorage })); });
+
+  await waitFor(() => expect(window.location.pathname).toBe('/login'));
+  expect(screen.getByRole('heading', { name: 'Iniciar sesión' })).toBeInTheDocument();
+  expect(screen.getByText('Se cerró la sesión en otra pestaña.')).toBeInTheDocument();
 });
